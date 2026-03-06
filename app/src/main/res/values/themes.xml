@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Base.Theme.QwenChat" parent="Theme.Material3.DayNight.NoActionBar">
+    </style>
+
+    <style name="Theme.QwenChat" parent="Base.Theme.QwenChat" />
+</resources>
