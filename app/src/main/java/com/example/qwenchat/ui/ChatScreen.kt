@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -24,6 +23,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
@@ -45,9 +46,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+
 import com.example.qwenchat.MainViewModel
+
+// Semi-transparent blue for user bubbles
+private val UserBubbleColor = Color(0x331976D2)
+private val UserBubbleColorDark = Color(0x3342A5F5)
+// Semi-transparent forest green for assistant bubbles
+private val AssistantBubbleColor = Color(0x2E2E7D32)
+private val AssistantBubbleColorDark = Color(0x2E66BB6A)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,16 +67,29 @@ fun ChatScreen(
     appState: MainViewModel.AppState,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
+    onNewChat: () -> Unit,
+    onSessionsClick: () -> Unit,
     onSettingsClick: () -> Unit,
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val isGenerating = appState is MainViewModel.AppState.Generating
 
-    // Auto-scroll to bottom when new messages arrive
+    // Auto-scroll to bottom of the last message during generation
     LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
+            val lastIndex = messages.size - 1
+            listState.scrollToItem(lastIndex)
+            // Scroll to the very bottom of the last item
+            val layoutInfo = listState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()
+            if (lastVisible != null && lastVisible.index == lastIndex) {
+                val bottomOffset = lastVisible.size - layoutInfo.viewportSize.height +
+                        layoutInfo.afterContentPadding
+                if (bottomOffset > 0) {
+                    listState.scrollToItem(lastIndex, bottomOffset)
+                }
+            }
         }
     }
 
@@ -74,6 +98,12 @@ fun ChatScreen(
             TopAppBar(
                 title = { Text("Qwen Chat") },
                 actions = {
+                    IconButton(onClick = onNewChat) {
+                        Icon(Icons.Default.NoteAdd, contentDescription = "New chat")
+                    }
+                    IconButton(onClick = onSessionsClick) {
+                        Icon(Icons.Default.History, contentDescription = "Sessions")
+                    }
                     IconButton(onClick = onSettingsClick) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
@@ -164,18 +194,19 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         Column(
-            modifier = Modifier.widthIn(max = 320.dp)
+            modifier = Modifier.fillMaxWidth(if (isUser) 0.85f else 0.95f)
         ) {
             if (isUser) {
+                val isDark = !MaterialTheme.colorScheme.surface.luminance().let { it > 0.5f }
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .background(if (isDark) UserBubbleColorDark else UserBubbleColor)
                         .padding(12.dp)
                 ) {
                     Text(
                         text = message.content,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             } else {
@@ -198,15 +229,16 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
 
 @Composable
 private fun AssistantText(text: String) {
+    val isDark = !MaterialTheme.colorScheme.surface.luminance().let { it > 0.5f }
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .background(if (isDark) AssistantBubbleColorDark else AssistantBubbleColor)
             .padding(12.dp)
     ) {
         Text(
             text = text,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }

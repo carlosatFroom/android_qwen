@@ -63,6 +63,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var generationJob: Job? = null
     private var nextId = 0L
 
+    val sessionStore = SessionStore(application)
+    private var currentSession: Session? = null
+
     private val _appState = MutableStateFlow<AppState>(AppState.NoModel)
     val appState: StateFlow<AppState> = _appState
 
@@ -71,6 +74,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _statusText = MutableStateFlow("")
     val statusText: StateFlow<String> = _statusText
+
+    private val _sessions = MutableStateFlow<List<Session>>(emptyList())
+    val sessions: StateFlow<List<Session>> = _sessions
+
+    private val _currentSessionId = MutableStateFlow<String?>(null)
+    val currentSessionId: StateFlow<String?> = _currentSessionId
 
     // Settings
     private val _temperature = MutableStateFlow(DEFAULT_TEMPERATURE)
@@ -92,7 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.Default) {
             engine = AiChat.getInferenceEngine(app.applicationContext)
             loadSettings()
-            // Auto-load model if path saved
+            refreshSessions()
             _modelPath.value?.let { path ->
                 if (File(path).exists()) {
                     loadModelFromPath(path)
@@ -182,19 +191,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _appState.value = AppState.LoadingModel
                 _statusText.value = "Initializing engine..."
 
-                // Wait for engine to finish native init
                 engine.state.first { it is EngineState.Initialized || it is EngineState.Error }
                 if (engine.state.value is EngineState.Error) {
                     throw Exception("Engine failed to initialize")
                 }
 
-                // Apply context size before loading (affects prepare())
                 engine.setContextSize(_contextSize.value)
 
                 _statusText.value = "Loading model..."
                 engine.loadModel(path)
 
-                // Apply settings after model is loaded and prepared
                 engine.setTemperature(_temperature.value)
                 engine.setEnableThinking(_reasoningEnabled.value)
 
@@ -216,6 +222,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage(text: String) {
         if (text.isBlank() || _appState.value != AppState.Ready) return
 
+        // Create a new session if none active
+        if (currentSession == null) {
+            currentSession = Session()
+            _currentSessionId.value = currentSession!!.id
+        }
+
         val userMsg = ChatMessage(nextId++, text, isUser = true)
         _messages.value = _messages.value + userMsg
 
@@ -228,6 +240,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         generationJob = viewModelScope.launch(Dispatchers.Default) {
             engine.sendUserPrompt(text)
                 .onCompletion {
+                    // Save session after generation completes
+                    saveCurrentSession()
                     withContext(Dispatchers.Main) {
                         _appState.value = AppState.Ready
                     }
@@ -244,14 +258,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun saveCurrentSession() {
+        val session = currentSession ?: return
+        val msgs = _messages.value
+        if (msgs.isEmpty()) return
+
+        // Auto-name from first user message
+        val name = session.name.ifEmpty {
+            msgs.firstOrNull { it.isUser }?.content?.take(50) ?: "New chat"
+        }
+
+        val updated = session.copy(name = name, messages = msgs)
+        currentSession = updated
+        sessionStore.saveSession(updated)
+        refreshSessions()
+    }
+
     fun stopGeneration() {
         generationJob?.cancel()
         generationJob = null
     }
 
-    fun clearChat() {
+    fun newChat() {
+        currentSession = null
+        _currentSessionId.value = null
         _messages.value = emptyList()
-        // Re-send system prompt to reset context
         if (_appState.value == AppState.Ready) {
             viewModelScope.launch(Dispatchers.Default) {
                 try {
@@ -261,6 +292,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun loadSession(session: Session) {
+        currentSession = session
+        _currentSessionId.value = session.id
+        _messages.value = session.messages
+        // Update nextId to avoid collisions
+        val maxId = session.messages.maxOfOrNull { it.id } ?: 0
+        nextId = maxId + 1
+    }
+
+    fun deleteSession(id: String) {
+        viewModelScope.launch {
+            sessionStore.deleteSession(id)
+            if (currentSession?.id == id) {
+                newChat()
+            }
+            refreshSessions()
+        }
+    }
+
+    fun renameSession(id: String, name: String) {
+        viewModelScope.launch {
+            val session = sessionStore.loadSession(id) ?: return@launch
+            val updated = session.copy(name = name)
+            sessionStore.saveSession(updated)
+            if (currentSession?.id == id) {
+                currentSession = updated
+            }
+            refreshSessions()
+        }
+    }
+
+    private suspend fun refreshSessions() {
+        _sessions.value = sessionStore.listSessions()
     }
 
     fun dismissError() {

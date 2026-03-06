@@ -7,7 +7,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,8 +22,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.qwenchat.download.ModelDownloader
+import com.example.qwenchat.ui.QwenChatTheme
 import com.example.qwenchat.ui.ChatScreen
 import com.example.qwenchat.ui.ModelScreen
+import com.example.qwenchat.ui.SessionsScreen
 import com.example.qwenchat.ui.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -46,7 +47,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            MaterialTheme {
+            QwenChatTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     AppNavigation(
                         onPickFile = { callback ->
@@ -74,6 +75,8 @@ private fun AppNavigation(
     val contextSize by viewModel.contextSize.collectAsState()
     val systemPrompt by viewModel.systemPrompt.collectAsState()
     val reasoningEnabled by viewModel.reasoningEnabled.collectAsState()
+    val sessions by viewModel.sessions.collectAsState()
+    val currentSessionId by viewModel.currentSessionId.collectAsState()
 
     var downloadProgress by remember { mutableStateOf<Float?>(null) }
 
@@ -83,7 +86,7 @@ private fun AppNavigation(
     // React to state changes for navigation
     LaunchedEffect(showChat) {
         val currentRoute = navController.currentDestination?.route
-        if (showChat && currentRoute != "chat" && currentRoute != "settings") {
+        if (showChat && currentRoute != "chat" && currentRoute != "settings" && currentRoute != "sessions") {
             navController.navigate("chat") {
                 popUpTo("model") { inclusive = true }
             }
@@ -135,7 +138,20 @@ private fun AppNavigation(
                 appState = appState,
                 onSend = { viewModel.sendMessage(it) },
                 onStop = { viewModel.stopGeneration() },
+                onNewChat = { viewModel.newChat() },
+                onSessionsClick = { navController.navigate("sessions") },
                 onSettingsClick = { navController.navigate("settings") }
+            )
+        }
+
+        composable("sessions") {
+            SessionsScreen(
+                sessions = sessions,
+                currentSessionId = currentSessionId,
+                onSessionClick = { viewModel.loadSession(it) },
+                onNewChat = { viewModel.newChat() },
+                onDelete = { viewModel.deleteSession(it) },
+                onBack = { navController.popBackStack() }
             )
         }
 

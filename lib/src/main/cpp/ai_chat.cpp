@@ -313,8 +313,33 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
-    auto formatted = common_chat_format_single(
-            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
+
+    const bool use_jinja = g_enable_thinking;
+    const bool add_ass = (role == ROLE_USER);
+
+    // Replicate common_chat_format_single logic with enable_thinking support
+    common_chat_templates_inputs inputs;
+    inputs.use_jinja = use_jinja;
+    inputs.enable_thinking = g_enable_thinking;
+
+    std::string fmt_past_msg;
+    if (!chat_msgs.empty()) {
+        inputs.messages = chat_msgs;
+        inputs.add_generation_prompt = false;
+        fmt_past_msg = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+    }
+
+    std::ostringstream ss;
+    if (add_ass && !fmt_past_msg.empty() && fmt_past_msg.back() == '\n') {
+        ss << "\n";
+    }
+
+    inputs.messages.push_back(new_msg);
+    inputs.add_generation_prompt = add_ass;
+    auto fmt_new_msg = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+    ss << fmt_new_msg.substr(fmt_past_msg.size(), fmt_new_msg.size() - fmt_past_msg.size());
+
+    auto formatted = ss.str();
     chat_msgs.push_back(new_msg);
     LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
     return formatted;
