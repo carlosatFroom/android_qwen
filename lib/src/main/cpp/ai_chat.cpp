@@ -313,34 +313,8 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
-
-    // Use template apply with thinking support
-    common_chat_templates_inputs inputs;
-    inputs.messages = chat_msgs;
-    inputs.messages.push_back(new_msg);
-    inputs.add_generation_prompt = (role == ROLE_USER);
-    inputs.use_jinja = true;
-    inputs.enable_thinking = g_enable_thinking;
-
-    auto result = common_chat_templates_apply(g_chat_templates.get(), inputs);
-    auto formatted = result.prompt;
-
-    // If we have previous messages, strip the prefix that was already formatted
-    if (!chat_msgs.empty()) {
-        common_chat_templates_inputs prev_inputs;
-        prev_inputs.messages = chat_msgs;
-        prev_inputs.add_generation_prompt = false;
-        prev_inputs.use_jinja = true;
-        prev_inputs.enable_thinking = g_enable_thinking;
-
-        auto prev_result = common_chat_templates_apply(g_chat_templates.get(), prev_inputs);
-        auto prev_formatted = prev_result.prompt;
-
-        if (formatted.substr(0, prev_formatted.size()) == prev_formatted) {
-            formatted = formatted.substr(prev_formatted.size());
-        }
-    }
-
+    auto formatted = common_chat_format_single(
+            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
     chat_msgs.push_back(new_msg);
     LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
     return formatted;

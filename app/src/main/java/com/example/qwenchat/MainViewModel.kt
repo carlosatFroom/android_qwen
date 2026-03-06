@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.arm.aichat.InferenceEngine.State as EngineState
 import java.io.File
 import java.io.FileOutputStream
 
@@ -179,14 +180,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.Default) {
             try {
                 _appState.value = AppState.LoadingModel
-                _statusText.value = "Loading model..."
+                _statusText.value = "Initializing engine..."
 
-                // Apply settings before loading
+                // Wait for engine to finish native init
+                engine.state.first { it is EngineState.Initialized || it is EngineState.Error }
+                if (engine.state.value is EngineState.Error) {
+                    throw Exception("Engine failed to initialize")
+                }
+
+                // Apply context size before loading (affects prepare())
                 engine.setContextSize(_contextSize.value)
+
+                _statusText.value = "Loading model..."
+                engine.loadModel(path)
+
+                // Apply settings after model is loaded and prepared
                 engine.setTemperature(_temperature.value)
                 engine.setEnableThinking(_reasoningEnabled.value)
-
-                engine.loadModel(path)
 
                 _statusText.value = "Setting system prompt..."
                 engine.setSystemPrompt(_systemPrompt.value)
