@@ -34,12 +34,20 @@ import java.io.File
 class MainActivity : ComponentActivity() {
 
     private var pendingFilePick: ((android.net.Uri?) -> Unit)? = null
+    private var pendingImagePick: ((android.net.Uri?) -> Unit)? = null
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         pendingFilePick?.invoke(uri)
         pendingFilePick = null
+    }
+
+    private val imagePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        pendingImagePick?.invoke(uri)
+        pendingImagePick = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,6 +61,10 @@ class MainActivity : ComponentActivity() {
                         onPickFile = { callback ->
                             pendingFilePick = callback
                             filePickerLauncher.launch(arrayOf("*/*"))
+                        },
+                        onPickImage = { callback ->
+                            pendingImagePick = callback
+                            imagePickerLauncher.launch("image/*")
                         }
                     )
                 }
@@ -65,6 +77,7 @@ class MainActivity : ComponentActivity() {
 private fun AppNavigation(
     viewModel: MainViewModel = viewModel(),
     onPickFile: (callback: (android.net.Uri?) -> Unit) -> Unit,
+    onPickImage: (callback: (android.net.Uri?) -> Unit) -> Unit,
 ) {
     val navController = rememberNavController()
     val scope = rememberCoroutineScope()
@@ -77,6 +90,8 @@ private fun AppNavigation(
     val reasoningEnabled by viewModel.reasoningEnabled.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
     val currentSessionId by viewModel.currentSessionId.collectAsState()
+    val visionAvailable by viewModel.visionAvailable.collectAsState()
+    val pendingImagePath by viewModel.pendingImagePath.collectAsState()
 
     var downloadProgress by remember { mutableStateOf<Float?>(null) }
 
@@ -136,11 +151,19 @@ private fun AppNavigation(
             ChatScreen(
                 messages = messages,
                 appState = appState,
+                visionAvailable = visionAvailable,
+                pendingImagePath = pendingImagePath,
                 onSend = { viewModel.sendMessage(it) },
                 onStop = { viewModel.stopGeneration() },
                 onNewChat = { viewModel.newChat() },
                 onSessionsClick = { navController.navigate("sessions") },
-                onSettingsClick = { navController.navigate("settings") }
+                onSettingsClick = { navController.navigate("settings") },
+                onAttachImage = {
+                    onPickImage { uri ->
+                        uri?.let { viewModel.attachImage(it) }
+                    }
+                },
+                onClearAttachment = { viewModel.clearAttachment() }
             )
         }
 
@@ -161,10 +184,16 @@ private fun AppNavigation(
                 contextSize = contextSize,
                 systemPrompt = systemPrompt,
                 reasoningEnabled = reasoningEnabled,
+                mmprojLoaded = visionAvailable,
                 onTemperatureChange = { viewModel.updateTemperature(it) },
                 onContextSizeChange = { viewModel.updateContextSize(it) },
                 onSystemPromptChange = { viewModel.updateSystemPrompt(it) },
                 onReasoningChange = { viewModel.updateReasoning(it) },
+                onPickMmproj = {
+                    onPickFile { uri ->
+                        uri?.let { viewModel.loadMmprojFromUri(it) }
+                    }
+                },
                 onBack = { navController.popBackStack() }
             )
         }

@@ -1,6 +1,8 @@
 package com.example.qwenchat.ui
 
+import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,6 +26,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.Settings
@@ -47,7 +52,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 
@@ -65,11 +72,15 @@ private val AssistantBubbleColorDark = Color(0x2E66BB6A)
 fun ChatScreen(
     messages: List<MainViewModel.ChatMessage>,
     appState: MainViewModel.AppState,
+    visionAvailable: Boolean = false,
+    pendingImagePath: String? = null,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onNewChat: () -> Unit,
     onSessionsClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onAttachImage: () -> Unit = {},
+    onClearAttachment: () -> Unit = {},
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -129,6 +140,30 @@ fun ChatScreen(
                 }
             }
 
+            // Pending image preview
+            if (pendingImagePath != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LocalImage(
+                        path = pendingImagePath,
+                        modifier = Modifier
+                            .heightIn(max = 80.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                    IconButton(onClick = onClearAttachment) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Remove image",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
             // Input bar
             Row(
                 modifier = Modifier
@@ -137,6 +172,15 @@ fun ChatScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (visionAvailable) {
+                    IconButton(
+                        onClick = onAttachImage,
+                        enabled = appState is MainViewModel.AppState.Ready
+                    ) {
+                        Icon(Icons.Default.AttachFile, contentDescription = "Attach image")
+                    }
+                }
+
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
@@ -204,10 +248,22 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
                         .background(if (isDark) UserBubbleColorDark else UserBubbleColor)
                         .padding(12.dp)
                 ) {
-                    Text(
-                        text = message.content,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    Column {
+                        message.imageUri?.let { path ->
+                            LocalImage(
+                                path = path,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 200.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        Text(
+                            text = message.content,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             } else {
                 val content = message.content
@@ -274,6 +330,21 @@ private fun ThinkingBlock(thinking: String) {
 }
 
 private data class ThinkResult(val thinking: String, val answer: String)
+
+@Composable
+private fun LocalImage(path: String, modifier: Modifier = Modifier) {
+    val bitmap = remember(path) {
+        BitmapFactory.decodeFile(path)?.asImageBitmap()
+    }
+    bitmap?.let {
+        Image(
+            bitmap = it,
+            contentDescription = "Attached image",
+            modifier = modifier,
+            contentScale = ContentScale.Fit
+        )
+    }
+}
 
 private fun parseThinking(content: String): ThinkResult? {
     val thinkStart = content.indexOf("<think>")

@@ -32,6 +32,10 @@ endif()
 
 set(LLAMA_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../llama.cpp/)
 add_subdirectory(${LLAMA_SRC} build-llama)
+if(NOT DEFINED LLAMA_INSTALL_VERSION)
+    set(LLAMA_INSTALL_VERSION 0.0.0)
+endif()
+add_subdirectory(${LLAMA_SRC}/tools/mtmd build-mtmd EXCLUDE_FROM_ALL)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
         ai_chat.cpp)
@@ -47,10 +51,12 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${LLAMA_SRC}/common
         ${LLAMA_SRC}/include
         ${LLAMA_SRC}/ggml/include
-        ${LLAMA_SRC}/ggml/src)
+        ${LLAMA_SRC}/ggml/src
+        ${LLAMA_SRC}/tools/mtmd)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         llama
         common
+        mtmd
         android
         log)

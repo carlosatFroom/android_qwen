@@ -30,6 +30,7 @@ class SessionStore(context: Context) {
                         put("id", msg.id)
                         put("content", msg.content)
                         put("isUser", msg.isUser)
+                        msg.imageUri?.let { put("imageUri", it) }
                     })
                 }
             })
@@ -69,6 +70,7 @@ class SessionStore(context: Context) {
                 id = m.getLong("id"),
                 content = m.getString("content"),
                 isUser = m.getBoolean("isUser"),
+                imageUri = m.optString("imageUri", null),
             )
         }
         return Session(

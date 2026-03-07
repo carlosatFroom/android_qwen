@@ -10,6 +10,8 @@
 #include "chat.h"
 #include "common.h"
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 template<class T>
 static std::string join(const std::vector<T> &values, const std::string &delim) {
@@ -40,6 +42,7 @@ static llama_context                    * g_context;
 static llama_batch                        g_batch;
 static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
+static mtmd_context                     * g_mtmd_ctx = nullptr;
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -314,7 +317,9 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     new_msg.role = role;
     new_msg.content = content;
 
-    const bool use_jinja = g_enable_thinking;
+    // Only use jinja for non-system messages; Qwen's jinja template
+    // requires at least one user message, so it crashes on system-only input.
+    const bool use_jinja = g_enable_thinking && (role != ROLE_SYSTEM);
     const bool add_ass = (role == ROLE_USER);
 
     // Replicate common_chat_format_single logic with enable_thinking support
@@ -324,9 +329,23 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
 
     std::string fmt_past_msg;
     if (!chat_msgs.empty()) {
-        inputs.messages = chat_msgs;
-        inputs.add_generation_prompt = false;
-        fmt_past_msg = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+        // For fmt_past_msg, check if we can use jinja: Qwen's template requires
+        // at least one user message, so fall back to non-jinja when only system msgs exist.
+        bool past_use_jinja = use_jinja;
+        if (past_use_jinja) {
+            bool has_user = false;
+            for (const auto& m : chat_msgs) {
+                if (m.role != ROLE_SYSTEM) { has_user = true; break; }
+            }
+            if (!has_user) past_use_jinja = false;
+        }
+
+        common_chat_templates_inputs past_inputs;
+        past_inputs.use_jinja = past_use_jinja;
+        past_inputs.enable_thinking = g_enable_thinking;
+        past_inputs.messages = chat_msgs;
+        past_inputs.add_generation_prompt = false;
+        fmt_past_msg = common_chat_templates_apply(g_chat_templates.get(), past_inputs).prompt;
     }
 
     std::ostringstream ss;
@@ -334,6 +353,7 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
         ss << "\n";
     }
 
+    inputs.messages = chat_msgs;
     inputs.messages.push_back(new_msg);
     inputs.add_generation_prompt = add_ass;
     auto fmt_new_msg = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
@@ -487,6 +507,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     // Update position
     current_position += user_prompt_size;
     stop_generation_position = current_position + user_prompt_size + n_predict;
+
+    // The jinja template with enable_thinking already includes <think>...</think>
+    // in the generation prompt tokens, so no seeding is needed here.
+
     return 0;
 }
 
@@ -581,11 +605,125 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
 
 extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeLoadMmproj(JNIEnv *env, jobject, jstring jpath) {
+    const auto *path = env->GetStringUTFChars(jpath, nullptr);
+    LOGi("Loading mmproj from: %s", path);
+
+    mtmd_context_params params = mtmd_context_params_default();
+    params.use_gpu = false;
+    params.n_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
+                                                  (int) sysconf(_SC_NPROCESSORS_ONLN) -
+                                                  N_THREADS_HEADROOM));
+
+    g_mtmd_ctx = mtmd_init_from_file(path, g_model, params);
+    env->ReleaseStringUTFChars(jpath, path);
+
+    if (!g_mtmd_ctx) {
+        LOGe("Failed to initialize mtmd context");
+        return 1;
+    }
+
+    LOGi("Vision support: %s", mtmd_support_vision(g_mtmd_ctx) ? "yes" : "no");
+    return 0;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeIsVisionLoaded(JNIEnv *, jobject) {
+    return g_mtmd_ctx != nullptr && mtmd_support_vision(g_mtmd_ctx);
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
+        JNIEnv *env, jobject, jstring jprompt, jbyteArray jimageData, jint n_predict) {
+    reset_short_term_states();
+
+    const auto *user_prompt = env->GetStringUTFChars(jprompt, nullptr);
+
+    // Build prompt with media marker before user text
+    const char *marker = mtmd_default_marker();
+    std::string prompt_with_image = std::string(marker) + "\n" + user_prompt;
+    env->ReleaseStringUTFChars(jprompt, user_prompt);
+
+    // Format through chat template
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    std::string formatted;
+    if (has_chat_template) {
+        formatted = chat_add_and_format(ROLE_USER, prompt_with_image);
+    } else {
+        formatted = prompt_with_image;
+    }
+
+    // Get image bytes from Java
+    jsize image_len = env->GetArrayLength(jimageData);
+    auto *image_bytes = env->GetByteArrayElements(jimageData, nullptr);
+
+    auto *bitmap = mtmd_helper_bitmap_init_from_buf(
+        g_mtmd_ctx,
+        reinterpret_cast<const unsigned char *>(image_bytes),
+        image_len
+    );
+    env->ReleaseByteArrayElements(jimageData, image_bytes, JNI_ABORT);
+
+    if (!bitmap) {
+        LOGe("Failed to create bitmap from image data");
+        return 3;
+    }
+
+    // Tokenize text + image
+    mtmd_input_text input_text;
+    input_text.text = formatted.c_str();
+    input_text.add_special = has_chat_template;
+    input_text.parse_special = has_chat_template;
+
+    auto *chunks = mtmd_input_chunks_init();
+    const mtmd_bitmap *bitmaps[] = { bitmap };
+
+    int32_t tokenize_result = mtmd_tokenize(g_mtmd_ctx, chunks, &input_text, bitmaps, 1);
+    mtmd_bitmap_free(bitmap);
+
+    if (tokenize_result != 0) {
+        LOGe("mtmd_tokenize failed: %d", tokenize_result);
+        mtmd_input_chunks_free(chunks);
+        return 4;
+    }
+
+    LOGi("Vision prompt: %zu chunks, %zu total tokens",
+         mtmd_input_chunks_size(chunks), mtmd_helper_get_n_tokens(chunks));
+
+    // Evaluate all chunks (text + image)
+    llama_pos new_n_past = 0;
+    int32_t eval_result = mtmd_helper_eval_chunks(
+        g_mtmd_ctx, g_context, chunks,
+        current_position, 0, BATCH_SIZE, true, &new_n_past
+    );
+    mtmd_input_chunks_free(chunks);
+
+    if (eval_result != 0) {
+        LOGe("mtmd_helper_eval_chunks failed: %d", eval_result);
+        return 5;
+    }
+
+    current_position = new_n_past;
+    stop_generation_position = current_position + n_predict;
+
+    return 0;
+}
+
+extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, jobject /*unused*/) {
     // Reset long-term & short-term states
     reset_long_term_states();
     reset_short_term_states();
+
+    // Free vision context
+    if (g_mtmd_ctx) {
+        mtmd_free(g_mtmd_ctx);
+        g_mtmd_ctx = nullptr;
+    }
 
     // Free up resources
     common_sampler_free(g_sampler);

@@ -38,6 +38,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         private val KEY_REASONING = booleanPreferencesKey("reasoning")
         private val KEY_MODEL_PATH = stringPreferencesKey("model_path")
+        private val KEY_MMPROJ_PATH = stringPreferencesKey("mmproj_path")
 
         const val DEFAULT_TEMPERATURE = 0.3f
         const val DEFAULT_CONTEXT_SIZE = 8192
@@ -48,6 +49,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val id: Long,
         val content: String,
         val isUser: Boolean,
+        val imageUri: String? = null,
     )
 
     sealed class AppState {
@@ -97,6 +99,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _modelPath = MutableStateFlow<String?>(null)
     val modelPath: StateFlow<String?> = _modelPath
 
+    private val _mmprojPath = MutableStateFlow<String?>(null)
+    val mmprojPath: StateFlow<String?> = _mmprojPath
+
+    private val _visionAvailable = MutableStateFlow(false)
+    val visionAvailable: StateFlow<Boolean> = _visionAvailable
+
+    private val _pendingImagePath = MutableStateFlow<String?>(null)
+    val pendingImagePath: StateFlow<String?> = _pendingImagePath
+
     init {
         viewModelScope.launch(Dispatchers.Default) {
             engine = AiChat.getInferenceEngine(app.applicationContext)
@@ -117,6 +128,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _systemPrompt.value = prefs[KEY_SYSTEM_PROMPT] ?: DEFAULT_SYSTEM_PROMPT
         _reasoningEnabled.value = prefs[KEY_REASONING] ?: false
         _modelPath.value = prefs[KEY_MODEL_PATH]
+        _mmprojPath.value = prefs[KEY_MMPROJ_PATH]
     }
 
     private suspend fun saveSettings() {
@@ -126,6 +138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             prefs[KEY_SYSTEM_PROMPT] = _systemPrompt.value
             prefs[KEY_REASONING] = _reasoningEnabled.value
             _modelPath.value?.let { prefs[KEY_MODEL_PATH] = it }
+            _mmprojPath.value?.let { prefs[KEY_MMPROJ_PATH] = it }
         }
     }
 
@@ -204,6 +217,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 engine.setTemperature(_temperature.value)
                 engine.setEnableThinking(_reasoningEnabled.value)
 
+                // Load vision projector if available
+                _mmprojPath.value?.let { mmprojPath ->
+                    if (File(mmprojPath).exists()) {
+                        _statusText.value = "Loading vision model..."
+                        try {
+                            engine.loadMmproj(mmprojPath)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to load mmproj (continuing without vision)", e)
+                        }
+                    }
+                }
+                _visionAvailable.value = engine.isVisionLoaded()
+
                 _statusText.value = "Setting system prompt..."
                 engine.setSystemPrompt(_systemPrompt.value)
 
@@ -219,6 +245,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun loadMmprojFromUri(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _statusText.value = "Copying vision model..."
+                val modelsDir = File(app.filesDir, "models").also {
+                    if (!it.exists()) it.mkdirs()
+                }
+                val destFile = File(modelsDir, "mmproj.gguf")
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output)
+                    }
+                } ?: throw Exception("Could not open file")
+
+                _mmprojPath.value = destFile.absolutePath
+                saveSettings()
+
+                if (_appState.value == AppState.Ready) {
+                    _statusText.value = "Loading vision model..."
+                    engine.loadMmproj(destFile.absolutePath)
+                    _visionAvailable.value = engine.isVisionLoaded()
+                }
+                _statusText.value = ""
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load mmproj", e)
+                _statusText.value = ""
+            }
+        }
+    }
+
+    fun attachImage(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val imagesDir = File(app.filesDir, "images").also {
+                    if (!it.exists()) it.mkdirs()
+                }
+                val destFile = File(imagesDir, "${System.currentTimeMillis()}.jpg")
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output)
+                    }
+                } ?: return@launch
+                _pendingImagePath.value = destFile.absolutePath
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to attach image", e)
+            }
+        }
+    }
+
+    fun clearAttachment() {
+        val path = _pendingImagePath.value
+        _pendingImagePath.value = null
+        // Delete the temp file if it was never sent
+        path?.let { File(it).delete() }
+    }
+
     fun sendMessage(text: String) {
         if (text.isBlank() || _appState.value != AppState.Ready) return
 
@@ -228,7 +310,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentSessionId.value = currentSession!!.id
         }
 
-        val userMsg = ChatMessage(nextId++, text, isUser = true)
+        val imagePath = _pendingImagePath.value
+        _pendingImagePath.value = null
+
+        val userMsg = ChatMessage(nextId++, text, isUser = true, imageUri = imagePath)
         _messages.value = _messages.value + userMsg
 
         val assistantId = nextId++
@@ -238,9 +323,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val responseBuilder = StringBuilder()
 
         generationJob = viewModelScope.launch(Dispatchers.Default) {
-            engine.sendUserPrompt(text)
+            val tokenFlow = if (imagePath != null) {
+                val imageData = File(imagePath).readBytes()
+                engine.sendUserPromptWithImage(text, imageData)
+            } else {
+                engine.sendUserPrompt(text)
+            }
+
+            tokenFlow
                 .onCompletion {
-                    // Save session after generation completes
                     saveCurrentSession()
                     withContext(Dispatchers.Main) {
                         _appState.value = AppState.Ready

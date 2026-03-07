@@ -104,6 +104,15 @@ internal class InferenceEngineImpl private constructor(
     private external fun generateNextToken(): String?
 
     @FastNative
+    private external fun nativeLoadMmproj(path: String): Int
+
+    @FastNative
+    private external fun nativeIsVisionLoaded(): Boolean
+
+    @FastNative
+    private external fun processUserPromptWithImage(prompt: String, imageData: ByteArray, predictLength: Int): Int
+
+    @FastNative
     private external fun nativeSetEnableThinking(enable: Boolean)
 
     @FastNative
@@ -219,6 +228,72 @@ internal class InferenceEngineImpl private constructor(
             Log.i(TAG, "System prompt processed! Awaiting user prompt...")
             _state.value = InferenceEngine.State.ModelReady
         }
+
+    override suspend fun loadMmproj(path: String) {
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) {
+                "Cannot load mmproj in ${_state.value.javaClass.simpleName}!"
+            }
+            Log.i(TAG, "Loading mmproj... \n$path")
+            File(path).let {
+                require(it.exists()) { "mmproj file not found" }
+                require(it.canRead()) { "Cannot read mmproj file" }
+            }
+            nativeLoadMmproj(path).let {
+                if (it != 0) throw IOException("Failed to load mmproj: $it")
+            }
+            Log.i(TAG, "mmproj loaded!")
+        }
+    }
+
+    override fun isVisionLoaded(): Boolean =
+        runBlocking(llamaDispatcher) { nativeIsVisionLoaded() }
+
+    override fun sendUserPromptWithImage(
+        message: String,
+        imageData: ByteArray,
+        predictLength: Int,
+    ): Flow<String> = flow {
+        require(message.isNotEmpty()) { "User prompt discarded due to being empty!" }
+        check(_state.value is InferenceEngine.State.ModelReady) {
+            "User prompt discarded due to: ${_state.value.javaClass.simpleName}"
+        }
+
+        try {
+            Log.i(TAG, "Sending user prompt with image (${imageData.size} bytes)...")
+            _readyForSystemPrompt = false
+            _state.value = InferenceEngine.State.ProcessingUserPrompt
+
+            processUserPromptWithImage(message, imageData, predictLength).let { result ->
+                if (result != 0) {
+                    Log.e(TAG, "Failed to process user prompt with image: $result")
+                    return@flow
+                }
+            }
+
+            Log.i(TAG, "User prompt with image processed. Generating assistant prompt...")
+            _state.value = InferenceEngine.State.Generating
+            while (!_cancelGeneration) {
+                generateNextToken()?.let { utf8token ->
+                    if (utf8token.isNotEmpty()) emit(utf8token)
+                } ?: break
+            }
+            if (_cancelGeneration) {
+                Log.i(TAG, "Assistant generation aborted per requested.")
+            } else {
+                Log.i(TAG, "Assistant generation complete. Awaiting user prompt...")
+            }
+            _state.value = InferenceEngine.State.ModelReady
+        } catch (e: CancellationException) {
+            Log.i(TAG, "Assistant generation's flow collection cancelled.")
+            _state.value = InferenceEngine.State.ModelReady
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during generation!", e)
+            _state.value = InferenceEngine.State.Error(e)
+            throw e
+        }
+    }.flowOn(llamaDispatcher)
 
     /**
      * Send plain text user prompt to LLM, which starts generating tokens in a [Flow]

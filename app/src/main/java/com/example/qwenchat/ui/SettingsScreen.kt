@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,10 +35,12 @@ fun SettingsScreen(
     contextSize: Int,
     systemPrompt: String,
     reasoningEnabled: Boolean,
+    mmprojLoaded: Boolean = false,
     onTemperatureChange: (Float) -> Unit,
     onContextSizeChange: (Int) -> Unit,
     onSystemPromptChange: (String) -> Unit,
     onReasoningChange: (Boolean) -> Unit,
+    onPickMmproj: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -119,6 +122,25 @@ fun SettingsScreen(
                     checked = reasoningEnabled,
                     onCheckedChange = onReasoningChange
                 )
+            }
+
+            // Vision Projector
+            Column {
+                Text(
+                    "Vision Projector (mmproj)",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    if (mmprojLoaded) "Loaded - image attachments enabled"
+                    else "Load an mmproj GGUF file to enable image input",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (mmprojLoaded) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = onPickMmproj) {
+                    Text(if (mmprojLoaded) "Replace Vision Model" else "Load Vision Model")
+                }
             }
 
             // System Prompt
