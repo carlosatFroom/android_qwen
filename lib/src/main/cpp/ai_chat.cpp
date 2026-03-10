@@ -325,7 +325,7 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     // Replicate common_chat_format_single logic with enable_thinking support
     common_chat_templates_inputs inputs;
     inputs.use_jinja = use_jinja;
-    inputs.enable_thinking = g_enable_thinking;
+    inputs.enable_thinking = use_jinja && g_enable_thinking;
 
     std::string fmt_past_msg;
     if (!chat_msgs.empty()) {
@@ -616,7 +616,31 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeLoadMmproj(JNIEnv *env, j
                                                   (int) sysconf(_SC_NPROCESSORS_ONLN) -
                                                   N_THREADS_HEADROOM));
 
+    // Redirect stderr to logcat so clip/mtmd diagnostics are visible
+    int stderr_pipe[2];
+    int old_stderr = -1;
+    if (pipe(stderr_pipe) == 0) {
+        old_stderr = dup(STDERR_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stderr_pipe[1]);
+    }
+
     g_mtmd_ctx = mtmd_init_from_file(path, g_model, params);
+
+    // Capture and log stderr output
+    if (old_stderr >= 0) {
+        fflush(stderr);
+        dup2(old_stderr, STDERR_FILENO);
+        close(old_stderr);
+        char buf[4096];
+        ssize_t n = read(stderr_pipe[0], buf, sizeof(buf) - 1);
+        close(stderr_pipe[0]);
+        if (n > 0) {
+            buf[n] = '\0';
+            LOGe("mmproj stderr: %s", buf);
+        }
+    }
+
     env->ReleaseStringUTFChars(jpath, path);
 
     if (!g_mtmd_ctx) {

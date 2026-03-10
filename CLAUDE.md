@@ -17,6 +17,13 @@
 - JNI methods added to lib must be prefixed `native` in Kotlin (e.g., `nativeSetTemperature`) to avoid clashing with public interface overrides
 - XML theme uses `android:Theme.Material.Light.NoActionBar` (Compose handles its own Material3 theming)
 
+### Vision / Multimodal
+- Requires an **mmproj GGUF file** matching the exact text model variant (e.g., Qwen3.5-**2B** mmproj for the 2B text model — using the 4B mmproj will fail with an n_embd mismatch)
+- Images are downscaled to max 1024px and re-compressed as JPEG 85% before sending to the model (reduces token count and processing time)
+- EXIF orientation is applied during downscaling and in the UI preview to prevent rotation artifacts
+- Vision inference runs **CPU-only** (`use_gpu = false`); the Vulkan backend compiles but crashes the Adreno driver during `vkCreateComputePipelines` on the Samsung S24 Ultra (Snapdragon 8 Gen 3). Vulkan config is commented out in `lib/build.gradle.kts` — re-enable when Samsung ships a driver fix
+- `mtmd_init_from_file` diagnostic logs go to stderr, not logcat; the `nativeLoadMmproj` JNI function redirects stderr during init to capture clip/mtmd error output
+
 # CLAUDE.md
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.

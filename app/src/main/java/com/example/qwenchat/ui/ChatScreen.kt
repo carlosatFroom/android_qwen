@@ -1,6 +1,8 @@
 package com.example.qwenchat.ui
 
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -329,7 +331,22 @@ private fun ThinkingBlock(thinking: String) {
 @Composable
 private fun LocalImage(path: String, modifier: Modifier = Modifier) {
     val bitmap = remember(path) {
-        BitmapFactory.decodeFile(path)?.asImageBitmap()
+        BitmapFactory.decodeFile(path)?.let { bmp ->
+            val rotation = try {
+                when (ExifInterface(path).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+                )) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } catch (_: Exception) { 0f }
+            if (rotation != 0f) {
+                val matrix = Matrix().apply { postRotate(rotation) }
+                android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+            } else bmp
+        }?.asImageBitmap()
     }
     bitmap?.let {
         Image(

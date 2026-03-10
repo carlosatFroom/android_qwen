@@ -1,8 +1,13 @@
 package com.example.qwenchat
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -341,7 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         generationJob = viewModelScope.launch(Dispatchers.Default) {
             val tokenFlow = if (imagePath != null) {
-                val imageData = File(imagePath).readBytes()
+                val imageData = downscaleImage(imagePath, 1024)
                 engine.sendUserPromptWithImage(text, imageData)
             } else {
                 engine.sendUserPrompt(text)
@@ -440,6 +445,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun refreshSessions() {
         _sessions.value = sessionStore.listSessions()
+    }
+
+    private fun downscaleImage(path: String, maxDim: Int): ByteArray {
+        val original = BitmapFactory.decodeFile(path)
+            ?: return File(path).readBytes()
+        val rotated = applyExifRotation(original, path)
+        val w = rotated.width
+        val h = rotated.height
+        val bitmap = if (w <= maxDim && h <= maxDim) {
+            rotated
+        } else {
+            val scale = maxDim.toFloat() / maxOf(w, h)
+            val scaled = Bitmap.createScaledBitmap(
+                rotated, (w * scale).toInt(), (h * scale).toInt(), true
+            )
+            if (scaled !== rotated) rotated.recycle()
+            Log.i(TAG, "Image downscaled: ${w}x${h} -> ${(w * scale).toInt()}x${(h * scale).toInt()}")
+            scaled
+        }
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        bitmap.recycle()
+        Log.i(TAG, "Image output: ${out.size()} bytes")
+        return out.toByteArray()
+    }
+
+    private fun applyExifRotation(bitmap: Bitmap, path: String): Bitmap {
+        val rotation = try {
+            when (ExifInterface(path).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+            )) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> return bitmap
+            }
+        } catch (_: Exception) { return bitmap }
+        val matrix = Matrix().apply { postRotate(rotation) }
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (rotated !== bitmap) bitmap.recycle()
+        return rotated
     }
 
     fun dismissError() {
