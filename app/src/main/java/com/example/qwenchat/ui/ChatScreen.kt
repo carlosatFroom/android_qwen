@@ -266,17 +266,14 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
                     }
                 }
             } else {
-                val content = message.content
-                val thinkResult = parseThinking(content)
-
-                if (thinkResult != null) {
-                    ThinkingBlock(thinkResult.thinking)
-                    if (thinkResult.answer.isNotBlank()) {
+                if (message.reasoningContent != null) {
+                    ThinkingBlock(message.reasoningContent)
+                    if (message.content.isNotBlank()) {
                         Spacer(modifier = Modifier.height(4.dp))
-                        AssistantText(thinkResult.answer)
+                        AssistantText(message.content)
                     }
                 } else {
-                    AssistantText(content)
+                    AssistantText(message.content)
                 }
             }
         }
@@ -329,8 +326,6 @@ private fun ThinkingBlock(thinking: String) {
     }
 }
 
-private data class ThinkResult(val thinking: String, val answer: String)
-
 @Composable
 private fun LocalImage(path: String, modifier: Modifier = Modifier) {
     val bitmap = remember(path) {
@@ -346,21 +341,3 @@ private fun LocalImage(path: String, modifier: Modifier = Modifier) {
     }
 }
 
-private fun parseThinking(content: String): ThinkResult? {
-    val thinkStart = content.indexOf("<think>")
-    if (thinkStart == -1) return null
-
-    val thinkEnd = content.indexOf("</think>")
-    return if (thinkEnd == -1) {
-        // Still thinking (tag not closed yet)
-        ThinkResult(
-            thinking = content.substring(thinkStart + 7),
-            answer = ""
-        )
-    } else {
-        ThinkResult(
-            thinking = content.substring(thinkStart + 7, thinkEnd),
-            answer = content.substring(thinkEnd + 8).trim()
-        )
-    }
-}

@@ -43,6 +43,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val DEFAULT_TEMPERATURE = 0.3f
         const val DEFAULT_CONTEXT_SIZE = 8192
         const val DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+
+        /** Separate `<think>…</think>` reasoning from the answer. */
+        fun splitThinking(raw: String): Pair<String, String?> {
+            val thinkStart = raw.indexOf("<think>")
+            if (thinkStart == -1) return raw to null
+
+            val thinkEnd = raw.indexOf("</think>")
+            return if (thinkEnd == -1) {
+                // Still thinking — no answer yet
+                "" to raw.substring(thinkStart + 7)
+            } else {
+                val reasoning = raw.substring(thinkStart + 7, thinkEnd)
+                val answer = raw.substring(thinkEnd + 8).trim()
+                answer to reasoning
+            }
+        }
     }
 
     data class ChatMessage(
@@ -50,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val content: String,
         val isUser: Boolean,
         val imageUri: String? = null,
+        val reasoningContent: String? = null,
     )
 
     sealed class AppState {
@@ -320,7 +337,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = _messages.value + ChatMessage(assistantId, "", isUser = false)
 
         _appState.value = AppState.Generating
-        val responseBuilder = StringBuilder()
+        val rawBuilder = StringBuilder()
 
         generationJob = viewModelScope.launch(Dispatchers.Default) {
             val tokenFlow = if (imagePath != null) {
@@ -338,11 +355,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .collect { token ->
-                    responseBuilder.append(token)
+                    rawBuilder.append(token)
+                    val raw = rawBuilder.toString()
+                    val (content, reasoning) = splitThinking(raw)
                     val updated = _messages.value.toMutableList()
                     val idx = updated.indexOfLast { it.id == assistantId }
                     if (idx >= 0) {
-                        updated[idx] = updated[idx].copy(content = responseBuilder.toString())
+                        updated[idx] = updated[idx].copy(
+                            content = content,
+                            reasoningContent = reasoning,
+                        )
                         _messages.value = updated
                     }
                 }
