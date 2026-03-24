@@ -35,11 +35,13 @@ fun SettingsScreen(
     contextSize: Int,
     systemPrompt: String,
     reasoningEnabled: Boolean,
+    recursionDepth: Int,
     mmprojLoaded: Boolean = false,
     onTemperatureChange: (Float) -> Unit,
     onContextSizeChange: (Int) -> Unit,
     onSystemPromptChange: (String) -> Unit,
     onReasoningChange: (Boolean) -> Unit,
+    onRecursionDepthChange: (Int) -> Unit,
     onPickMmproj: () -> Unit = {},
     onBack: () -> Unit,
 ) {
@@ -98,6 +100,26 @@ fun SettingsScreen(
                     onValueChange = { onContextSizeChange(it.toInt()) },
                     valueRange = 2048f..32768f,
                     steps = 14
+                )
+            }
+
+            // Recursion Depth
+            Column {
+                Text(
+                    "Recursion Depth: $recursionDepth",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    if (recursionDepth == 0) "No recursion — single answer"
+                    else "Repeats the question $recursionDepth time${if (recursionDepth > 1) "s" else ""}, shows only the final refined answer",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = recursionDepth.toFloat(),
+                    onValueChange = { onRecursionDepthChange(it.toInt()) },
+                    valueRange = 0f..6f,
+                    steps = 5
                 )
             }
 

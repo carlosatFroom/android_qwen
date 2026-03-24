@@ -44,10 +44,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private val KEY_REASONING = booleanPreferencesKey("reasoning")
         private val KEY_MODEL_PATH = stringPreferencesKey("model_path")
         private val KEY_MMPROJ_PATH = stringPreferencesKey("mmproj_path")
+        private val KEY_RECURSION_DEPTH = intPreferencesKey("recursion_depth")
 
         const val DEFAULT_TEMPERATURE = 0.3f
         const val DEFAULT_CONTEXT_SIZE = 8192
         const val DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+        const val DEFAULT_RECURSION_DEPTH = 0
 
         /** Separate `<think>…</think>` reasoning from the answer. */
         fun splitThinking(raw: String): Pair<String, String?> {
@@ -127,6 +129,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _visionAvailable = MutableStateFlow(false)
     val visionAvailable: StateFlow<Boolean> = _visionAvailable
 
+    private val _recursionDepth = MutableStateFlow(DEFAULT_RECURSION_DEPTH)
+    val recursionDepth: StateFlow<Int> = _recursionDepth
+
     private val _pendingImagePath = MutableStateFlow<String?>(null)
     val pendingImagePath: StateFlow<String?> = _pendingImagePath
 
@@ -149,6 +154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _contextSize.value = prefs[KEY_CONTEXT_SIZE] ?: DEFAULT_CONTEXT_SIZE
         _systemPrompt.value = prefs[KEY_SYSTEM_PROMPT] ?: DEFAULT_SYSTEM_PROMPT
         _reasoningEnabled.value = prefs[KEY_REASONING] ?: false
+        _recursionDepth.value = prefs[KEY_RECURSION_DEPTH] ?: DEFAULT_RECURSION_DEPTH
         _modelPath.value = prefs[KEY_MODEL_PATH]
         _mmprojPath.value = prefs[KEY_MMPROJ_PATH]
     }
@@ -159,6 +165,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             prefs[KEY_CONTEXT_SIZE] = _contextSize.value
             prefs[KEY_SYSTEM_PROMPT] = _systemPrompt.value
             prefs[KEY_REASONING] = _reasoningEnabled.value
+            prefs[KEY_RECURSION_DEPTH] = _recursionDepth.value
             _modelPath.value?.let { prefs[KEY_MODEL_PATH] = it }
             _mmprojPath.value?.let { prefs[KEY_MMPROJ_PATH] = it }
         }
@@ -182,6 +189,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateSystemPrompt(prompt: String) {
         _systemPrompt.value = prompt
+        viewModelScope.launch { saveSettings() }
+    }
+
+    fun updateRecursionDepth(depth: Int) {
+        _recursionDepth.value = depth.coerceIn(0, 6)
         viewModelScope.launch { saveSettings() }
     }
 
@@ -342,37 +354,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = _messages.value + ChatMessage(assistantId, "", isUser = false)
 
         _appState.value = AppState.Generating
-        val rawBuilder = StringBuilder()
+        val totalRounds = _recursionDepth.value + 1 // depth 0 = 1 round (normal)
 
         generationJob = viewModelScope.launch(Dispatchers.Default) {
-            val tokenFlow = if (imagePath != null) {
-                val imageData = downscaleImage(imagePath, 1024)
-                engine.sendUserPromptWithImage(text, imageData)
-            } else {
-                engine.sendUserPrompt(text)
-            }
+            try {
+                for (round in 1..totalRounds) {
+                    val isLastRound = round == totalRounds
 
-            tokenFlow
-                .onCompletion {
-                    saveCurrentSession()
-                    withContext(Dispatchers.Main) {
-                        _appState.value = AppState.Ready
+                    if (totalRounds > 1) {
+                        val updated = _messages.value.toMutableList()
+                        val idx = updated.indexOfLast { it.id == assistantId }
+                        if (idx >= 0) {
+                            updated[idx] = updated[idx].copy(
+                                content = if (isLastRound) "" else "Refining answer ($round/$totalRounds)...",
+                                reasoningContent = null,
+                            )
+                            _messages.value = updated
+                        }
                     }
-                }
-                .collect { token ->
-                    rawBuilder.append(token)
-                    val raw = rawBuilder.toString()
-                    val (content, reasoning) = splitThinking(raw)
-                    val updated = _messages.value.toMutableList()
-                    val idx = updated.indexOfLast { it.id == assistantId }
-                    if (idx >= 0) {
-                        updated[idx] = updated[idx].copy(
-                            content = content,
-                            reasoningContent = reasoning,
-                        )
-                        _messages.value = updated
+
+                    val tokenFlow = if (round == 1 && imagePath != null) {
+                        val imageData = downscaleImage(imagePath, 1024)
+                        engine.sendUserPromptWithImage(text, imageData)
+                    } else {
+                        engine.sendUserPrompt(text)
                     }
+
+                    val rawBuilder = StringBuilder()
+                    tokenFlow.collect { token ->
+                        rawBuilder.append(token)
+                        if (isLastRound) {
+                            val raw = rawBuilder.toString()
+                            val (content, reasoning) = splitThinking(raw)
+                            val updated = _messages.value.toMutableList()
+                            val idx = updated.indexOfLast { it.id == assistantId }
+                            if (idx >= 0) {
+                                updated[idx] = updated[idx].copy(
+                                    content = content,
+                                    reasoningContent = reasoning,
+                                )
+                                _messages.value = updated
+                            }
+                        }
+                    }
+
+                    // For intermediate rounds, update the message with the silent result
+                    // (the engine already has it in context for the next round)
                 }
+            } finally {
+                saveCurrentSession()
+                withContext(Dispatchers.Main) {
+                    _appState.value = AppState.Ready
+                }
+            }
         }
     }
 

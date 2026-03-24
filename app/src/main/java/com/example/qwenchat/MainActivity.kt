@@ -88,6 +88,7 @@ private fun AppNavigation(
     val contextSize by viewModel.contextSize.collectAsState()
     val systemPrompt by viewModel.systemPrompt.collectAsState()
     val reasoningEnabled by viewModel.reasoningEnabled.collectAsState()
+    val recursionDepth by viewModel.recursionDepth.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
     val currentSessionId by viewModel.currentSessionId.collectAsState()
     val visionAvailable by viewModel.visionAvailable.collectAsState()
@@ -184,11 +185,13 @@ private fun AppNavigation(
                 contextSize = contextSize,
                 systemPrompt = systemPrompt,
                 reasoningEnabled = reasoningEnabled,
+                recursionDepth = recursionDepth,
                 mmprojLoaded = visionAvailable,
                 onTemperatureChange = { viewModel.updateTemperature(it) },
                 onContextSizeChange = { viewModel.updateContextSize(it) },
                 onSystemPromptChange = { viewModel.updateSystemPrompt(it) },
                 onReasoningChange = { viewModel.updateReasoning(it) },
+                onRecursionDepthChange = { viewModel.updateRecursionDepth(it) },
                 onPickMmproj = {
                     onPickFile { uri ->
                         uri?.let { viewModel.loadMmprojFromUri(it) }
