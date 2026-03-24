@@ -48,6 +48,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         const val DEFAULT_TEMPERATURE = 0.3f
         const val DEFAULT_CONTEXT_SIZE = 8192
+        const val MAX_CONTEXT_SIZE = 32768 // Qwen3.5 trained context
+        const val MIN_PREDICT_PER_ROUND = 128
         const val DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
         const val DEFAULT_RECURSION_DEPTH = 0
 
@@ -194,6 +196,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateRecursionDepth(depth: Int) {
         _recursionDepth.value = depth.coerceIn(0, 6)
+        // Auto-scale context size: each refinement round needs room for prompt + response.
+        // Scale from base 8192 up to MAX_CONTEXT_SIZE proportional to total rounds.
+        if (_recursionDepth.value > 0) {
+            val totalRounds = _recursionDepth.value + 1
+            val scaledCtx = (DEFAULT_CONTEXT_SIZE * totalRounds).coerceAtMost(MAX_CONTEXT_SIZE)
+            if (scaledCtx > _contextSize.value) {
+                Log.i(TAG, "Auto-scaling context size to $scaledCtx for $totalRounds recursive rounds")
+                _contextSize.value = scaledCtx
+                if (::engine.isInitialized) {
+                    engine.setContextSize(scaledCtx)
+                }
+            }
+        }
         viewModelScope.launch { saveSettings() }
     }
 
@@ -201,6 +216,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _reasoningEnabled.value = enabled
         if (::engine.isInitialized) {
             engine.setEnableThinking(enabled)
+        }
+        // Reasoning uses substantial tokens for <think> tags; scale up context
+        if (enabled && _contextSize.value < MAX_CONTEXT_SIZE) {
+            val scaledCtx = (DEFAULT_CONTEXT_SIZE * 2).coerceAtMost(MAX_CONTEXT_SIZE)
+            if (scaledCtx > _contextSize.value) {
+                Log.i(TAG, "Auto-scaling context size to $scaledCtx for reasoning mode")
+                _contextSize.value = scaledCtx
+                if (::engine.isInitialized) {
+                    engine.setContextSize(scaledCtx)
+                }
+            }
         }
         viewModelScope.launch { saveSettings() }
     }
@@ -360,6 +386,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 for (round in 1..totalRounds) {
                     val isLastRound = round == totalRounds
+                    val remainingRounds = totalRounds - round + 1
+
+                    // Budget n_predict: use all remaining context, divided across remaining rounds
+                    val contextSize = engine.getActiveContextSize()
+                    val position = engine.getContextPosition()
+                    val available = contextSize - position - 16 // leave headroom
+                    val predictLength = (available / remainingRounds).coerceAtLeast(MIN_PREDICT_PER_ROUND)
+                    Log.d(TAG, "Round $round/$totalRounds: pos=$position ctx=$contextSize avail=$available predict=$predictLength")
 
                     if (totalRounds > 1) {
                         val updated = _messages.value.toMutableList()
@@ -375,9 +409,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     val tokenFlow = if (round == 1 && imagePath != null) {
                         val imageData = downscaleImage(imagePath, 1024)
-                        engine.sendUserPromptWithImage(text, imageData)
+                        engine.sendUserPromptWithImage(text, imageData, predictLength)
                     } else {
-                        engine.sendUserPrompt(text)
+                        engine.sendUserPrompt(text, predictLength)
                     }
 
                     val rawBuilder = StringBuilder()
@@ -398,8 +432,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    // For intermediate rounds, update the message with the silent result
-                    // (the engine already has it in context for the next round)
+                    // For intermediate rounds, the engine already has the response in context
                 }
             } finally {
                 saveCurrentSession()

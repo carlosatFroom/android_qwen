@@ -122,6 +122,12 @@ internal class InferenceEngineImpl private constructor(
     private external fun nativeSetContextSize(size: Int)
 
     @FastNative
+    private external fun nativeGetContextPosition(): Int
+
+    @FastNative
+    private external fun nativeGetContextSize(): Int
+
+    @FastNative
     private external fun unload()
 
     @FastNative
@@ -370,6 +376,12 @@ internal class InferenceEngineImpl private constructor(
     override fun setContextSize(size: Int) {
         runBlocking(llamaDispatcher) { nativeSetContextSize(size) }
     }
+
+    override fun getContextPosition(): Int =
+        runBlocking(llamaDispatcher) { nativeGetContextPosition() }
+
+    override fun getActiveContextSize(): Int =
+        runBlocking(llamaDispatcher) { nativeGetContextSize() }
 
     /**
      * Unloads the model and frees resources, or reset error states

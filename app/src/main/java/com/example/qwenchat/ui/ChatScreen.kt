@@ -3,6 +3,9 @@ package com.example.qwenchat.ui
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -47,6 +50,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -56,11 +60,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 
 import com.example.qwenchat.MainViewModel
+
+/** Detect LaTeX delimiters in text. */
+private val LATEX_PATTERN = Regex("""\$\$[\s\S]+?\$\$|\$[^\s$].*?[^\s$]\$|\\\[[\s\S]+?\\]|\\\(.*?\\\)""")
 
 // Semi-transparent blue for user bubbles
 private val UserBubbleColor = Color(0x331976D2)
@@ -285,17 +295,80 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
 @Composable
 private fun AssistantText(text: String) {
     val isDark = !MaterialTheme.colorScheme.surface.luminance().let { it > 0.5f }
+    val hasLatex = remember(text) { LATEX_PATTERN.containsMatchIn(text) }
+
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp))
             .background(if (isDark) AssistantBubbleColorDark else AssistantBubbleColor)
             .padding(12.dp)
     ) {
-        Text(
-            text = text,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        if (hasLatex) {
+            LatexText(text = text)
+        } else {
+            Text(
+                text = text,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
     }
+}
+
+@Composable
+private fun LatexText(text: String) {
+    val context = LocalContext.current
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val colorHex = remember(textColor) {
+        val argb = textColor.toArgb()
+        String.format("#%06X", argb and 0xFFFFFF)
+    }
+
+    // Height in dp, reported by JS callback
+    var webViewHeightDp by remember { mutableIntStateOf(200) }
+
+    val htmlTemplate = remember {
+        context.assets.open("katex.html").bufferedReader().readText()
+    }
+    val html = remember(colorHex) {
+        htmlTemplate.replace("BODY_COLOR", colorHex)
+    }
+
+    // Escape text for JS string
+    val escapedText = remember(text) {
+        text.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "")
+    }
+
+    AndroidView(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(webViewHeightDp.dp),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                addJavascriptInterface(object {
+                    @JavascriptInterface
+                    fun onHeightReady(height: Int) {
+                        // JS reports CSS pixels which map 1:1 to dp
+                        webViewHeightDp = height + 8 // small padding
+                    }
+                }, "AndroidBridge")
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        view?.evaluateJavascript("renderContent(\"$escapedText\")", null)
+                    }
+                }
+                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            }
+        },
+        update = { webView ->
+            webView.evaluateJavascript("renderContent(\"$escapedText\")", null)
+        }
+    )
 }
 
 @Composable

@@ -70,6 +70,16 @@ interface InferenceEngine {
     fun setContextSize(size: Int)
 
     /**
+     * Returns the current token position in the KV cache.
+     */
+    fun getContextPosition(): Int
+
+    /**
+     * Returns the active context size (n_ctx) of the loaded model.
+     */
+    fun getActiveContextSize(): Int
+
+    /**
      * Unloads the currently loaded model.
      */
     fun cleanUp()

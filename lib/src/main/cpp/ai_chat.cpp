@@ -300,6 +300,18 @@ static void reset_long_term_states(const bool clear_kv_cache = true) {
         llama_memory_clear(llama_get_memory(g_context), false);
 }
 
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeGetContextPosition(JNIEnv *, jobject) {
+    return current_position;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeGetContextSize(JNIEnv *, jobject) {
+    return g_context_size;
+}
+
 /**
  * Context shifting by discarding the older half of the tokens appended after system prompt
  */
