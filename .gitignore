@@ -33,3 +33,4 @@ google-services.json
 *.hprof
 venv/
 .claude.stash/
+build.sh

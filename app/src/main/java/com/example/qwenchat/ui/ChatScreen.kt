@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
@@ -141,14 +142,16 @@ fun ChatScreen(
                 .imePadding()
         ) {
             // Messages list
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                state = listState,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(messages, key = { it.id }) { message ->
-                    MessageBubble(message)
+            SelectionContainer(modifier = Modifier.weight(1f)) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(messages, key = { it.id }) { message ->
+                        MessageBubble(message)
+                    }
                 }
             }
 
