@@ -31,6 +31,25 @@ interface InferenceEngine {
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
 
     /**
+     * Load a multimodal projector (mmproj) for vision support.
+     */
+    suspend fun loadMmproj(path: String)
+
+    /**
+     * Whether vision (image) input is available.
+     */
+    fun isVisionLoaded(): Boolean
+
+    /**
+     * Sends a user prompt with an image to the loaded model and returns a Flow of generated tokens.
+     */
+    fun sendUserPromptWithImage(
+        message: String,
+        imageData: ByteArray,
+        predictLength: Int = DEFAULT_PREDICT_LENGTH,
+    ): Flow<String>
+
+    /**
      * Runs a benchmark with the specified parameters.
      */
     suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String
@@ -49,6 +68,16 @@ interface InferenceEngine {
      * Set context size (takes effect on next model load).
      */
     fun setContextSize(size: Int)
+
+    /**
+     * Returns the current token position in the KV cache.
+     */
+    fun getContextPosition(): Int
+
+    /**
+     * Returns the active context size (n_ctx) of the loaded model.
+     */
+    fun getActiveContextSize(): Int
 
     /**
      * Unloads the currently loaded model.

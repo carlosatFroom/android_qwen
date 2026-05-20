@@ -1,8 +1,13 @@
 package com.example.qwenchat
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -38,10 +43,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         private val KEY_REASONING = booleanPreferencesKey("reasoning")
         private val KEY_MODEL_PATH = stringPreferencesKey("model_path")
+        private val KEY_MMPROJ_PATH = stringPreferencesKey("mmproj_path")
+        private val KEY_RECURSION_DEPTH = intPreferencesKey("recursion_depth")
 
         const val DEFAULT_TEMPERATURE = 0.3f
         const val DEFAULT_CONTEXT_SIZE = 8192
+        const val MAX_CONTEXT_SIZE = 32768 // Qwen3.5 trained context
+        const val MIN_PREDICT_PER_ROUND = 128
         const val DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+        const val DEFAULT_RECURSION_DEPTH = 0
 
         /** Separate `<think>…</think>` reasoning from the answer. */
         fun splitThinking(raw: String): Pair<String, String?> {
@@ -64,6 +74,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val id: Long,
         val content: String,
         val isUser: Boolean,
+        val imageUri: String? = null,
         val reasoningContent: String? = null,
     )
 
@@ -114,6 +125,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _modelPath = MutableStateFlow<String?>(null)
     val modelPath: StateFlow<String?> = _modelPath
 
+    private val _mmprojPath = MutableStateFlow<String?>(null)
+    val mmprojPath: StateFlow<String?> = _mmprojPath
+
+    private val _visionAvailable = MutableStateFlow(false)
+    val visionAvailable: StateFlow<Boolean> = _visionAvailable
+
+    private val _recursionDepth = MutableStateFlow(DEFAULT_RECURSION_DEPTH)
+    val recursionDepth: StateFlow<Int> = _recursionDepth
+
+    private val _pendingImagePath = MutableStateFlow<String?>(null)
+    val pendingImagePath: StateFlow<String?> = _pendingImagePath
+
     init {
         viewModelScope.launch(Dispatchers.Default) {
             engine = AiChat.getInferenceEngine(app.applicationContext)
@@ -133,7 +156,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _contextSize.value = prefs[KEY_CONTEXT_SIZE] ?: DEFAULT_CONTEXT_SIZE
         _systemPrompt.value = prefs[KEY_SYSTEM_PROMPT] ?: DEFAULT_SYSTEM_PROMPT
         _reasoningEnabled.value = prefs[KEY_REASONING] ?: false
+        _recursionDepth.value = prefs[KEY_RECURSION_DEPTH] ?: DEFAULT_RECURSION_DEPTH
         _modelPath.value = prefs[KEY_MODEL_PATH]
+        _mmprojPath.value = prefs[KEY_MMPROJ_PATH]
     }
 
     private suspend fun saveSettings() {
@@ -142,7 +167,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             prefs[KEY_CONTEXT_SIZE] = _contextSize.value
             prefs[KEY_SYSTEM_PROMPT] = _systemPrompt.value
             prefs[KEY_REASONING] = _reasoningEnabled.value
+            prefs[KEY_RECURSION_DEPTH] = _recursionDepth.value
             _modelPath.value?.let { prefs[KEY_MODEL_PATH] = it }
+            _mmprojPath.value?.let { prefs[KEY_MMPROJ_PATH] = it }
         }
     }
 
@@ -167,10 +194,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { saveSettings() }
     }
 
+    fun updateRecursionDepth(depth: Int) {
+        _recursionDepth.value = depth.coerceIn(0, 6)
+        // Auto-scale context size: each refinement round needs room for prompt + response.
+        // Scale from base 8192 up to MAX_CONTEXT_SIZE proportional to total rounds.
+        if (_recursionDepth.value > 0) {
+            val totalRounds = _recursionDepth.value + 1
+            val scaledCtx = (DEFAULT_CONTEXT_SIZE * totalRounds).coerceAtMost(MAX_CONTEXT_SIZE)
+            if (scaledCtx > _contextSize.value) {
+                Log.i(TAG, "Auto-scaling context size to $scaledCtx for $totalRounds recursive rounds")
+                _contextSize.value = scaledCtx
+                if (::engine.isInitialized) {
+                    engine.setContextSize(scaledCtx)
+                }
+            }
+        }
+        viewModelScope.launch { saveSettings() }
+    }
+
     fun updateReasoning(enabled: Boolean) {
         _reasoningEnabled.value = enabled
         if (::engine.isInitialized) {
             engine.setEnableThinking(enabled)
+        }
+        // Reasoning uses substantial tokens for <think> tags; scale up context
+        if (enabled && _contextSize.value < MAX_CONTEXT_SIZE) {
+            val scaledCtx = (DEFAULT_CONTEXT_SIZE * 2).coerceAtMost(MAX_CONTEXT_SIZE)
+            if (scaledCtx > _contextSize.value) {
+                Log.i(TAG, "Auto-scaling context size to $scaledCtx for reasoning mode")
+                _contextSize.value = scaledCtx
+                if (::engine.isInitialized) {
+                    engine.setContextSize(scaledCtx)
+                }
+            }
         }
         viewModelScope.launch { saveSettings() }
     }
@@ -221,6 +277,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 engine.setTemperature(_temperature.value)
                 engine.setEnableThinking(_reasoningEnabled.value)
 
+                // Load vision projector if available
+                _mmprojPath.value?.let { mmprojPath ->
+                    if (File(mmprojPath).exists()) {
+                        _statusText.value = "Loading vision model..."
+                        try {
+                            engine.loadMmproj(mmprojPath)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to load mmproj (continuing without vision)", e)
+                        }
+                    }
+                }
+                _visionAvailable.value = engine.isVisionLoaded()
+
                 _statusText.value = "Setting system prompt..."
                 engine.setSystemPrompt(_systemPrompt.value)
 
@@ -236,6 +305,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun loadMmprojFromUri(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _statusText.value = "Copying vision model..."
+                val modelsDir = File(app.filesDir, "models").also {
+                    if (!it.exists()) it.mkdirs()
+                }
+                val destFile = File(modelsDir, "mmproj.gguf")
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output)
+                    }
+                } ?: throw Exception("Could not open file")
+
+                _mmprojPath.value = destFile.absolutePath
+                saveSettings()
+
+                if (_appState.value == AppState.Ready) {
+                    _statusText.value = "Loading vision model..."
+                    engine.loadMmproj(destFile.absolutePath)
+                    _visionAvailable.value = engine.isVisionLoaded()
+                }
+                _statusText.value = ""
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load mmproj", e)
+                _statusText.value = ""
+            }
+        }
+    }
+
+    fun attachImage(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val imagesDir = File(app.filesDir, "images").also {
+                    if (!it.exists()) it.mkdirs()
+                }
+                val destFile = File(imagesDir, "${System.currentTimeMillis()}.jpg")
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output)
+                    }
+                } ?: return@launch
+                _pendingImagePath.value = destFile.absolutePath
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to attach image", e)
+            }
+        }
+    }
+
+    fun clearAttachment() {
+        val path = _pendingImagePath.value
+        _pendingImagePath.value = null
+        // Delete the temp file if it was never sent
+        path?.let { File(it).delete() }
+    }
+
     fun sendMessage(text: String) {
         if (text.isBlank() || _appState.value != AppState.Ready) return
 
@@ -245,38 +370,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentSessionId.value = currentSession!!.id
         }
 
-        val userMsg = ChatMessage(nextId++, text, isUser = true)
+        val imagePath = _pendingImagePath.value
+        _pendingImagePath.value = null
+
+        val userMsg = ChatMessage(nextId++, text, isUser = true, imageUri = imagePath)
         _messages.value = _messages.value + userMsg
 
         val assistantId = nextId++
         _messages.value = _messages.value + ChatMessage(assistantId, "", isUser = false)
 
         _appState.value = AppState.Generating
-        val rawBuilder = StringBuilder()
+        val totalRounds = _recursionDepth.value + 1 // depth 0 = 1 round (normal)
 
         generationJob = viewModelScope.launch(Dispatchers.Default) {
-            engine.sendUserPrompt(text)
-                .onCompletion {
-                    // Save session after generation completes
-                    saveCurrentSession()
-                    withContext(Dispatchers.Main) {
-                        _appState.value = AppState.Ready
+            try {
+                for (round in 1..totalRounds) {
+                    val isLastRound = round == totalRounds
+                    val remainingRounds = totalRounds - round + 1
+
+                    // Budget n_predict: use all remaining context, divided across remaining rounds
+                    val contextSize = engine.getActiveContextSize()
+                    val position = engine.getContextPosition()
+                    val available = contextSize - position - 16 // leave headroom
+                    val predictLength = (available / remainingRounds).coerceAtLeast(MIN_PREDICT_PER_ROUND)
+                    Log.d(TAG, "Round $round/$totalRounds: pos=$position ctx=$contextSize avail=$available predict=$predictLength")
+
+                    if (totalRounds > 1) {
+                        val updated = _messages.value.toMutableList()
+                        val idx = updated.indexOfLast { it.id == assistantId }
+                        if (idx >= 0) {
+                            updated[idx] = updated[idx].copy(
+                                content = if (isLastRound) "" else "Refining answer ($round/$totalRounds)...",
+                                reasoningContent = null,
+                            )
+                            _messages.value = updated
+                        }
                     }
-                }
-                .collect { token ->
-                    rawBuilder.append(token)
-                    val raw = rawBuilder.toString()
-                    val (content, reasoning) = splitThinking(raw)
-                    val updated = _messages.value.toMutableList()
-                    val idx = updated.indexOfLast { it.id == assistantId }
-                    if (idx >= 0) {
-                        updated[idx] = updated[idx].copy(
-                            content = content,
-                            reasoningContent = reasoning,
-                        )
-                        _messages.value = updated
+
+                    val tokenFlow = if (round == 1 && imagePath != null) {
+                        val imageData = downscaleImage(imagePath, 1024)
+                        engine.sendUserPromptWithImage(text, imageData, predictLength)
+                    } else {
+                        engine.sendUserPrompt(text, predictLength)
                     }
+
+                    val rawBuilder = StringBuilder()
+                    tokenFlow.collect { token ->
+                        rawBuilder.append(token)
+                        if (isLastRound) {
+                            val raw = rawBuilder.toString()
+                            val (content, reasoning) = splitThinking(raw)
+                            val updated = _messages.value.toMutableList()
+                            val idx = updated.indexOfLast { it.id == assistantId }
+                            if (idx >= 0) {
+                                updated[idx] = updated[idx].copy(
+                                    content = content,
+                                    reasoningContent = reasoning,
+                                )
+                                _messages.value = updated
+                            }
+                        }
+                    }
+
+                    // For intermediate rounds, the engine already has the response in context
                 }
+            } finally {
+                saveCurrentSession()
+                withContext(Dispatchers.Main) {
+                    _appState.value = AppState.Ready
+                }
+            }
         }
     }
 
@@ -349,6 +512,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun refreshSessions() {
         _sessions.value = sessionStore.listSessions()
+    }
+
+    private fun downscaleImage(path: String, maxDim: Int): ByteArray {
+        val original = BitmapFactory.decodeFile(path)
+            ?: return File(path).readBytes()
+        val rotated = applyExifRotation(original, path)
+        val w = rotated.width
+        val h = rotated.height
+        val bitmap = if (w <= maxDim && h <= maxDim) {
+            rotated
+        } else {
+            val scale = maxDim.toFloat() / maxOf(w, h)
+            val scaled = Bitmap.createScaledBitmap(
+                rotated, (w * scale).toInt(), (h * scale).toInt(), true
+            )
+            if (scaled !== rotated) rotated.recycle()
+            Log.i(TAG, "Image downscaled: ${w}x${h} -> ${(w * scale).toInt()}x${(h * scale).toInt()}")
+            scaled
+        }
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        bitmap.recycle()
+        Log.i(TAG, "Image output: ${out.size()} bytes")
+        return out.toByteArray()
+    }
+
+    private fun applyExifRotation(bitmap: Bitmap, path: String): Bitmap {
+        val rotation = try {
+            when (ExifInterface(path).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+            )) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> return bitmap
+            }
+        } catch (_: Exception) { return bitmap }
+        val matrix = Matrix().apply { postRotate(rotation) }
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (rotated !== bitmap) bitmap.recycle()
+        return rotated
     }
 
     fun dismissError() {

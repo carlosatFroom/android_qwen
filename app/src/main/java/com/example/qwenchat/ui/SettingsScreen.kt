@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,10 +35,14 @@ fun SettingsScreen(
     contextSize: Int,
     systemPrompt: String,
     reasoningEnabled: Boolean,
+    recursionDepth: Int,
+    mmprojLoaded: Boolean = false,
     onTemperatureChange: (Float) -> Unit,
     onContextSizeChange: (Int) -> Unit,
     onSystemPromptChange: (String) -> Unit,
     onReasoningChange: (Boolean) -> Unit,
+    onRecursionDepthChange: (Int) -> Unit,
+    onPickMmproj: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -98,6 +103,26 @@ fun SettingsScreen(
                 )
             }
 
+            // Recursion Depth
+            Column {
+                Text(
+                    "Recursion Depth: $recursionDepth",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    if (recursionDepth == 0) "No recursion — single answer"
+                    else "Repeats the question $recursionDepth time${if (recursionDepth > 1) "s" else ""}, shows only the final refined answer",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = recursionDepth.toFloat(),
+                    onValueChange = { onRecursionDepthChange(it.toInt()) },
+                    valueRange = 0f..6f,
+                    steps = 5
+                )
+            }
+
             // Reasoning Mode
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -119,6 +144,25 @@ fun SettingsScreen(
                     checked = reasoningEnabled,
                     onCheckedChange = onReasoningChange
                 )
+            }
+
+            // Vision Projector
+            Column {
+                Text(
+                    "Vision Projector (mmproj)",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    if (mmprojLoaded) "Loaded - image attachments enabled"
+                    else "Load an mmproj GGUF file to enable image input",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (mmprojLoaded) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = onPickMmproj) {
+                    Text(if (mmprojLoaded) "Replace Vision Model" else "Load Vision Model")
+                }
             }
 
             // System Prompt

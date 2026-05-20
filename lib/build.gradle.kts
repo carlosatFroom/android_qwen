@@ -32,6 +32,16 @@ android {
                 arguments += "-DGGML_BACKEND_DL=ON"
                 arguments += "-DGGML_CPU_ALL_VARIANTS=ON"
                 arguments += "-DGGML_LLAMAFILE=OFF"
+
+                // Vulkan GPU backend — disabled due to Adreno driver crash
+                // during vkCreateComputePipelines (shader compilation).
+                // Re-enable when Samsung updates the Adreno Vulkan driver.
+                // arguments += "-DGGML_VULKAN=ON"
+                // val ndkDir = android.ndkDirectory.absolutePath
+                // val ndkSysroot = "$ndkDir/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+                // arguments += "-DVulkan_INCLUDE_DIR=/opt/homebrew/include"
+                // arguments += "-DVulkan_LIBRARY=$ndkSysroot/usr/lib/aarch64-linux-android/35/libvulkan.so"
+                // arguments += "-DVulkan_GLSLC_EXECUTABLE=$ndkDir/shader-tools/darwin-x86_64/glslc"
             }
         }
         aarMetadata {

@@ -1,6 +1,13 @@
 package com.example.qwenchat.ui
 
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -21,8 +29,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.Settings
@@ -40,6 +51,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -47,11 +59,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 
 import com.example.qwenchat.MainViewModel
+
+/** Detect LaTeX delimiters in text. */
+private val LATEX_PATTERN = Regex("""\$\$[\s\S]+?\$\$|\$[^\s$].*?[^\s$]\$|\\\[[\s\S]+?\\]|\\\(.*?\\\)""")
 
 // Semi-transparent blue for user bubbles
 private val UserBubbleColor = Color(0x331976D2)
@@ -65,11 +85,15 @@ private val AssistantBubbleColorDark = Color(0x2E66BB6A)
 fun ChatScreen(
     messages: List<MainViewModel.ChatMessage>,
     appState: MainViewModel.AppState,
+    visionAvailable: Boolean = false,
+    pendingImagePath: String? = null,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onNewChat: () -> Unit,
     onSessionsClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onAttachImage: () -> Unit = {},
+    onClearAttachment: () -> Unit = {},
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -118,14 +142,40 @@ fun ChatScreen(
                 .imePadding()
         ) {
             // Messages list
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                state = listState,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(messages, key = { it.id }) { message ->
-                    MessageBubble(message)
+            SelectionContainer(modifier = Modifier.weight(1f)) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(messages, key = { it.id }) { message ->
+                        MessageBubble(message)
+                    }
+                }
+            }
+
+            // Pending image preview
+            if (pendingImagePath != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LocalImage(
+                        path = pendingImagePath,
+                        modifier = Modifier
+                            .heightIn(max = 80.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                    IconButton(onClick = onClearAttachment) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Remove image",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
@@ -137,6 +187,15 @@ fun ChatScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (visionAvailable) {
+                    IconButton(
+                        onClick = onAttachImage,
+                        enabled = appState is MainViewModel.AppState.Ready
+                    ) {
+                        Icon(Icons.Default.AttachFile, contentDescription = "Attach image")
+                    }
+                }
+
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
@@ -204,10 +263,22 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
                         .background(if (isDark) UserBubbleColorDark else UserBubbleColor)
                         .padding(12.dp)
                 ) {
-                    Text(
-                        text = message.content,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    Column {
+                        message.imageUri?.let { path ->
+                            LocalImage(
+                                path = path,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 200.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        Text(
+                            text = message.content,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             } else {
                 if (message.reasoningContent != null) {
@@ -227,17 +298,80 @@ private fun MessageBubble(message: MainViewModel.ChatMessage) {
 @Composable
 private fun AssistantText(text: String) {
     val isDark = !MaterialTheme.colorScheme.surface.luminance().let { it > 0.5f }
+    val hasLatex = remember(text) { LATEX_PATTERN.containsMatchIn(text) }
+
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp))
             .background(if (isDark) AssistantBubbleColorDark else AssistantBubbleColor)
             .padding(12.dp)
     ) {
-        Text(
-            text = text,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        if (hasLatex) {
+            LatexText(text = text)
+        } else {
+            Text(
+                text = text,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
     }
+}
+
+@Composable
+private fun LatexText(text: String) {
+    val context = LocalContext.current
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val colorHex = remember(textColor) {
+        val argb = textColor.toArgb()
+        String.format("#%06X", argb and 0xFFFFFF)
+    }
+
+    // Height in dp, reported by JS callback
+    var webViewHeightDp by remember { mutableIntStateOf(200) }
+
+    val htmlTemplate = remember {
+        context.assets.open("katex.html").bufferedReader().readText()
+    }
+    val html = remember(colorHex) {
+        htmlTemplate.replace("BODY_COLOR", colorHex)
+    }
+
+    // Escape text for JS string
+    val escapedText = remember(text) {
+        text.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "")
+    }
+
+    AndroidView(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(webViewHeightDp.dp),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                addJavascriptInterface(object {
+                    @JavascriptInterface
+                    fun onHeightReady(height: Int) {
+                        // JS reports CSS pixels which map 1:1 to dp
+                        webViewHeightDp = height + 8 // small padding
+                    }
+                }, "AndroidBridge")
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        view?.evaluateJavascript("renderContent(\"$escapedText\")", null)
+                    }
+                }
+                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            }
+        },
+        update = { webView ->
+            webView.evaluateJavascript("renderContent(\"$escapedText\")", null)
+        }
+    )
 }
 
 @Composable
@@ -267,6 +401,36 @@ private fun ThinkingBlock(thinking: String) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun LocalImage(path: String, modifier: Modifier = Modifier) {
+    val bitmap = remember(path) {
+        BitmapFactory.decodeFile(path)?.let { bmp ->
+            val rotation = try {
+                when (ExifInterface(path).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+                )) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } catch (_: Exception) { 0f }
+            if (rotation != 0f) {
+                val matrix = Matrix().apply { postRotate(rotation) }
+                android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+            } else bmp
+        }?.asImageBitmap()
+    }
+    bitmap?.let {
+        Image(
+            bitmap = it,
+            contentDescription = "Attached image",
+            modifier = modifier,
+            contentScale = ContentScale.Fit
+        )
     }
 }
 
