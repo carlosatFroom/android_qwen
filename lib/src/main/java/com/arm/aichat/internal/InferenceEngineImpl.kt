@@ -128,6 +128,12 @@ internal class InferenceEngineImpl private constructor(
     private external fun nativeGetContextSize(): Int
 
     @FastNative
+    private external fun nativeGetPromptEvalCount(): Int
+
+    @FastNative
+    private external fun nativeGetEvalCount(): Int
+
+    @FastNative
     private external fun unload()
 
     @FastNative
@@ -232,6 +238,34 @@ internal class InferenceEngineImpl private constructor(
                 }
             }
             Log.i(TAG, "System prompt processed! Awaiting user prompt...")
+            _state.value = InferenceEngine.State.ModelReady
+        }
+
+    /**
+     * Reset the conversation context and install a fresh system prompt.
+     *
+     * The native [processSystemPrompt] already clears the KV cache and chat history before
+     * decoding the new system prompt, so this is safe to call between independent requests
+     * (e.g. a server serving unrelated jobs) without reloading the model.
+     */
+    override suspend fun resetSession(prompt: String) =
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) {
+                "Cannot reset session in ${_state.value.javaClass.simpleName}!"
+            }
+            val systemPrompt = prompt.ifBlank { " " }
+
+            _cancelGeneration = false
+            _state.value = InferenceEngine.State.ProcessingSystemPrompt
+            processSystemPrompt(systemPrompt).let { result ->
+                if (result != 0) {
+                    RuntimeException("Failed to reset session: $result").also {
+                        _state.value = InferenceEngine.State.Error(it)
+                        throw it
+                    }
+                }
+            }
+            _readyForSystemPrompt = false
             _state.value = InferenceEngine.State.ModelReady
         }
 
@@ -382,6 +416,12 @@ internal class InferenceEngineImpl private constructor(
 
     override fun getActiveContextSize(): Int =
         runBlocking(llamaDispatcher) { nativeGetContextSize() }
+
+    override fun getPromptEvalCount(): Int =
+        runBlocking(llamaDispatcher) { nativeGetPromptEvalCount() }
+
+    override fun getEvalCount(): Int =
+        runBlocking(llamaDispatcher) { nativeGetEvalCount() }
 
     /**
      * Unloads the model and frees resources, or reset error states

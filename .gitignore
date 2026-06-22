@@ -34,3 +34,8 @@ google-services.json
 venv/
 .claude.stash/
 build.sh
+models/
+
+# Model weights and local test scratch
+*.gguf
+answer*.json

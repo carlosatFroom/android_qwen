@@ -36,13 +36,18 @@ fun SettingsScreen(
     systemPrompt: String,
     reasoningEnabled: Boolean,
     recursionDepth: Int,
+    currentModelName: String = "",
     mmprojLoaded: Boolean = false,
+    serverRunning: Boolean = false,
+    serverUrl: String = "",
+    onPickModel: () -> Unit = {},
     onTemperatureChange: (Float) -> Unit,
     onContextSizeChange: (Int) -> Unit,
     onSystemPromptChange: (String) -> Unit,
     onReasoningChange: (Boolean) -> Unit,
     onRecursionDepthChange: (Int) -> Unit,
     onPickMmproj: () -> Unit = {},
+    onServerToggle: (Boolean) -> Unit = {},
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -65,6 +70,29 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
+            // Model
+            Column {
+                Text(
+                    "Model",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    if (currentModelName.isNotBlank()) "Current: $currentModelName"
+                    else "No model loaded",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "Loading a new model replaces the current one and resets the chat.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = onPickModel) {
+                    Text("Change Model")
+                }
+            }
+
             // Temperature
             Column {
                 Text(
@@ -163,6 +191,31 @@ fun SettingsScreen(
                 Button(onClick = onPickMmproj) {
                     Text(if (mmprojLoaded) "Replace Vision Model" else "Load Vision Model")
                 }
+            }
+
+            // API Server
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "API Server",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        if (serverRunning) "Serving Ollama/OpenAI API at $serverUrl"
+                        else "Expose this model over the LAN (Ollama & OpenAI compatible)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (serverRunning) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = serverRunning,
+                    onCheckedChange = onServerToggle
+                )
             }
 
             // System Prompt

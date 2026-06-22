@@ -2,14 +2,21 @@
 #include <jni.h>
 #include <iomanip>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <climits>
 #include <string>
+#include <vector>
 #include <unistd.h>
+#include <sched.h>
+#include <dirent.h>
 #include <sampling.h>
 
 #include "logging.h"
 #include "chat.h"
 #include "common.h"
 #include "llama.h"
+#include "ggml.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
@@ -29,6 +36,7 @@ static std::string join(const std::vector<T> &values, const std::string &delim) 
 constexpr int   N_THREADS_MIN           = 2;
 constexpr int   N_THREADS_MAX           = 4;
 constexpr int   N_THREADS_HEADROOM      = 2;
+constexpr int   N_BIG_THREADS_MAX       = 6;   // cap worker threads to the big-core cluster
 
 constexpr int   OVERFLOW_HEADROOM       = 4;
 constexpr int   BATCH_SIZE              = 512;
@@ -78,17 +86,123 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstr
     return 0;
 }
 
+// Read a core's advertised max frequency (kHz); -1 if unreadable.
+static long read_cpu_max_freq(int cpu) {
+    char path[128];
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    long khz = -1;
+    if (fscanf(f, "%ld", &khz) != 1) khz = -1;
+    fclose(f);
+    return khz;
+}
+
+// On big.LITTLE phones the OS parks the big cores and migrates inference onto the little
+// cores when the screen is off, throttling generation 5-20x. We pin the worker threads to
+// the big cluster (every core faster than the slowest cluster) so tokens keep flowing at
+// full speed. Falls back to an unpinned thread count when the topology can't be read.
+//
+// The CPU backends are loaded at runtime (multiple arch variants), so ggml's threadpool
+// affinity API isn't linkable here. Instead we apply the affinity ourselves with
+// sched_setaffinity over every thread in /proc/self/task — which covers the OpenMP workers.
+struct ThreadPlan {
+    int  n_threads = 1;
+    bool cpumask[GGML_MAX_N_THREADS] = {};
+    bool has_mask = false;
+};
+
+static ThreadPlan g_thread_plan;
+
+static ThreadPlan plan_big_core_threads() {
+    ThreadPlan plan;
+    const int fallback = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
+                                  (int) sysconf(_SC_NPROCESSORS_ONLN) - N_THREADS_HEADROOM));
+
+    const long n_conf = sysconf(_SC_NPROCESSORS_CONF); // includes currently-offline big cores
+    if (n_conf <= 0 || n_conf > GGML_MAX_N_THREADS) {
+        plan.n_threads = fallback;
+        return plan;
+    }
+
+    long max_freq = 0, min_freq = LONG_MAX;
+    std::vector<long> freq((size_t) n_conf, -1);
+    bool any = false;
+    for (int i = 0; i < n_conf; i++) {
+        freq[i] = read_cpu_max_freq(i);
+        if (freq[i] > 0) {
+            any = true;
+            max_freq = std::max(max_freq, freq[i]);
+            min_freq = std::min(min_freq, freq[i]);
+        }
+    }
+
+    if (!any || max_freq == min_freq) {
+        // Uniform SoC or sysfs unreadable: don't pin, just use a sane thread count.
+        plan.n_threads = fallback;
+        return plan;
+    }
+
+    int big = 0;
+    for (int i = 0; i < n_conf; i++) {
+        if (freq[i] > min_freq) { plan.cpumask[i] = true; big++; }
+    }
+
+    if (big < N_THREADS_MIN) {
+        // Too few big cores to bother pinning; let the scheduler decide.
+        for (bool &b : plan.cpumask) b = false;
+        plan.n_threads = fallback;
+        return plan;
+    }
+
+    plan.has_mask  = true;
+    plan.n_threads = std::min(N_BIG_THREADS_MAX, big);
+    return plan;
+}
+
+// Pin every thread of this process to the big-core cluster. Re-applied at the start of each
+// generation so OpenMP workers (created lazily on the first decode) and any threads the OS
+// tried to migrate to the little cores get herded back onto the big cores.
+static void pin_threads_to_big_cores() {
+    if (!g_thread_plan.has_mask) return;
+
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int n = 0;
+    for (int i = 0; i < GGML_MAX_N_THREADS && i < CPU_SETSIZE; i++) {
+        if (g_thread_plan.cpumask[i]) { CPU_SET(i, &set); n++; }
+    }
+    if (n == 0) return;
+
+    DIR *d = opendir("/proc/self/task");
+    if (!d) {
+        sched_setaffinity(0, sizeof(set), &set); // at least pin the caller
+        return;
+    }
+    int pinned = 0;
+    for (struct dirent *e = readdir(d); e != nullptr; e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        const int tid = atoi(e->d_name);
+        if (tid > 0 && sched_setaffinity(tid, sizeof(set), &set) == 0) pinned++;
+    }
+    closedir(d);
+    LOGi("%s: pinned %d threads to %d big cores", __func__, pinned, n);
+}
+
 static llama_context *init_context(llama_model *model, const int n_ctx) {
     if (!model) {
         LOGe("%s: model cannot be null", __func__);
         return nullptr;
     }
 
-    // Multi-threading setup
-    const int n_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
-                                                     (int) sysconf(_SC_NPROCESSORS_ONLN) -
-                                                     N_THREADS_HEADROOM));
-    LOGi("%s: Using %d threads", __func__, n_threads);
+    // Multi-threading setup: size the pool to the big-core cluster and remember the mask so
+    // generation can keep the workers pinned there even when the screen-off governor parks
+    // the big cores.
+    g_thread_plan = plan_big_core_threads();
+    const int n_threads = g_thread_plan.n_threads;
+    LOGi("%s: Using %d threads (big-core pinning: %s)", __func__, n_threads,
+         g_thread_plan.has_mask ? "on" : "off");
 
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
@@ -291,6 +405,12 @@ static std::vector<common_chat_msg> chat_msgs;
 static llama_pos system_prompt_position;
 static llama_pos current_position;
 
+// Token accounting for the most recent user request (ollama-style prompt_eval_count / eval_count).
+// prompt_eval is snapshotted when the prompt finishes decoding; eval_count is incremented per
+// generated token, so both stay correct even if context-shifting moves current_position mid-run.
+static int g_last_prompt_eval = 0;
+static int g_last_eval_count = 0;
+
 static void reset_long_term_states(const bool clear_kv_cache = true) {
     chat_msgs.clear();
     system_prompt_position = 0;
@@ -312,6 +432,18 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeGetContextSize(JNIEnv *, 
     return g_context_size;
 }
 
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeGetPromptEvalCount(JNIEnv *, jobject) {
+    return g_last_prompt_eval;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeGetEvalCount(JNIEnv *, jobject) {
+    return g_last_eval_count;
+}
+
 /**
  * Context shifting by discarding the older half of the tokens appended after system prompt
  */
@@ -322,6 +454,44 @@ static void shift_context() {
     llama_memory_seq_add(llama_get_memory(g_context), 0, system_prompt_position + n_discard, current_position, -n_discard);
     current_position -= n_discard;
     LOGi("%s: Context shifting done! Current position: %d", __func__, current_position);
+}
+
+// Apply the model's chat template, tolerant of templates that only work one way: some
+// (e.g. Qwen) support the legacy non-jinja path but their jinja template crashes on
+// system-only input; others (e.g. gemma4) have a "custom" template the legacy path rejects
+// with "this custom template is not supported, try using --jinja". So try the requested mode
+// and, if it throws, retry with the opposite mode. Returns the full params so callers can
+// recover the generation format (used to parse the model's reply back into clean content).
+static common_chat_params apply_template(common_chat_templates_inputs &inputs) {
+    try {
+        return common_chat_templates_apply(g_chat_templates.get(), inputs);
+    } catch (const std::exception &e) {
+        LOGw("%s: template apply failed (use_jinja=%d): %s — retrying with use_jinja=%d",
+             __func__, inputs.use_jinja, e.what(), !inputs.use_jinja);
+        inputs.use_jinja = !inputs.use_jinja;
+        return common_chat_templates_apply(g_chat_templates.get(), inputs);
+    }
+}
+
+// The chat format captured from the most recent generation prompt, plus the parser params
+// derived from it. The model's raw output (e.g. gpt-oss/harmony channel markers, <think>
+// blocks) is parsed back through these so only clean content reaches the caller. Reasoning
+// is kept inline (wrapped) when thinking is on, and dropped when it's off.
+static common_chat_params        g_chat_params;
+static common_chat_parser_params g_parser_params;
+
+static void rebuild_parser_params() {
+    g_parser_params = common_chat_parser_params(g_chat_params); // copies format + generation_prompt
+    if (!g_chat_params.parser.empty()) {
+        g_parser_params.parser.load(g_chat_params.parser);
+    }
+    // AUTO extracts reasoning into reasoning_content (which we drop). DEEPSEEK_LEGACY +
+    // reasoning_in_content keeps it inline (in <think> tags) for display when thinking is on.
+    g_parser_params.reasoning_format = g_enable_thinking
+        ? COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY
+        : COMMON_REASONING_FORMAT_AUTO;
+    g_parser_params.reasoning_in_content = g_enable_thinking;
+    g_parser_params.parse_tool_calls = false;
 }
 
 static std::string chat_add_and_format(const std::string &role, const std::string &content) {
@@ -357,7 +527,7 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
         past_inputs.enable_thinking = g_enable_thinking;
         past_inputs.messages = chat_msgs;
         past_inputs.add_generation_prompt = false;
-        fmt_past_msg = common_chat_templates_apply(g_chat_templates.get(), past_inputs).prompt;
+        fmt_past_msg = apply_template(past_inputs).prompt;
     }
 
     std::ostringstream ss;
@@ -368,8 +538,16 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     inputs.messages = chat_msgs;
     inputs.messages.push_back(new_msg);
     inputs.add_generation_prompt = add_ass;
-    auto fmt_new_msg = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+    auto new_params = apply_template(inputs);
+    const std::string &fmt_new_msg = new_params.prompt;
     ss << fmt_new_msg.substr(fmt_past_msg.size(), fmt_new_msg.size() - fmt_past_msg.size());
+
+    // Capture the format of the prompt the model will actually generate against, so the
+    // reply can be parsed back into clean content (stripping channel/think control tokens).
+    if (add_ass) {
+        g_chat_params = new_params;
+        rebuild_parser_params();
+    }
 
     auto formatted = ss.str();
     chat_msgs.push_back(new_msg);
@@ -382,12 +560,44 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
  */
 static llama_pos stop_generation_position;
 static std::string cached_token_chars;
-static std::ostringstream assistant_ss;
+static std::string g_gen_text;            // raw model output, fed to the chat parser
+static common_chat_msg g_stream_msg;      // last parsed message, for computing content deltas
+static bool g_pending_stop = false;       // emit a final flushed delta, then stop next call
 
 static void reset_short_term_states() {
     stop_generation_position = 0;
     cached_token_chars.clear();
-    assistant_ss.str("");
+    g_gen_text.clear();
+    g_stream_msg = common_chat_msg{};
+    g_pending_stop = false;
+    g_last_eval_count = 0;
+}
+
+// Content-only models (e.g. Qwen with no special channels) emit plain text, so we stream the
+// raw pieces verbatim — byte-identical to the pre-parser behaviour and zero parser overhead.
+// Anything else (gpt-oss/harmony channels, <think> blocks) must be parsed to strip markers.
+static bool format_needs_parsing() {
+    return g_chat_params.format != COMMON_CHAT_FORMAT_CONTENT_ONLY;
+}
+
+// Parse the accumulated raw output and return the newly-revealed clean content. With
+// reasoning_in_content set, reasoning is folded into content_delta; otherwise it lands in
+// reasoning_content_delta, which we intentionally discard. Defensive against parser throws so
+// a malformed partial can never crash the headless server mid-stream.
+static std::string parse_content_delta(bool is_partial) {
+    try {
+        common_chat_msg msg = common_chat_parse(g_gen_text, is_partial, g_parser_params);
+        if (msg.empty()) return std::string();
+        std::string delta;
+        for (const auto &d : common_chat_msg_diff::compute_diffs(g_stream_msg, msg)) {
+            delta += d.content_delta;
+        }
+        g_stream_msg = msg;
+        return delta;
+    } catch (const std::exception &e) {
+        LOGw("%s: chat parse failed: %s", __func__, e.what());
+        return std::string();
+    }
 }
 
 static int decode_tokens_in_batches(
@@ -483,6 +693,9 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     // Reset short-term states
     reset_short_term_states();
 
+    // Herd worker threads (incl. OpenMP) back onto the big cores before this turn's compute.
+    pin_threads_to_big_cores();
+
     // Obtain and tokenize user prompt
     const auto *const user_prompt = env->GetStringUTFChars(juser_prompt, nullptr);
     LOGd("%s: User prompt received: \n%s", __func__, user_prompt);
@@ -519,6 +732,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     // Update position
     current_position += user_prompt_size;
     stop_generation_position = current_position + user_prompt_size + n_predict;
+    g_last_prompt_eval = current_position; // full prompt (system + history + user) decoded so far
 
     // The jinja template with enable_thinking already includes <think>...</think>
     // in the generation prompt tokens, so no seeding is needed here.
@@ -562,6 +776,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         JNIEnv *env,
         jobject /*unused*/
 ) {
+    // A final flushed delta was emitted on the previous call after EOG; now actually stop.
+    if (g_pending_stop) {
+        g_pending_stop = false;
+        return nullptr;
+    }
+
     // Infinite text generation via context shifting
     if (current_position >= g_context_size - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
@@ -588,25 +808,38 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // Update position
     current_position++;
+    g_last_eval_count++;
 
-    // Stop if next token is EOG
+    // Stop if next token is EOG. Do a final (non-partial) parse to flush any content the
+    // parser was holding back, store the clean reply in history, then emit the last delta and
+    // stop on the following call.
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
         LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
-        chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
+        if (format_needs_parsing()) {
+            cached_token_chars += parse_content_delta(/*is_partial=*/false);
+            chat_add_and_format(ROLE_ASSISTANT, g_stream_msg.content);
+        } else {
+            chat_add_and_format(ROLE_ASSISTANT, g_gen_text);
+        }
+        if (!cached_token_chars.empty() && is_valid_utf8(cached_token_chars.c_str())) {
+            jstring result = env->NewStringUTF(cached_token_chars.c_str());
+            cached_token_chars.clear();
+            g_pending_stop = true; // emit this trailing content now, stop next call
+            return result;
+        }
         return nullptr;
     }
 
-    // If not EOG, convert to text
-    auto new_token_chars = common_token_to_piece(g_context, new_token_id);
-    cached_token_chars += new_token_chars;
+    // If not EOG, accumulate the raw piece, then derive the newly-revealed clean content
+    // (parsed for channelled models, verbatim for content-only ones).
+    std::string piece = common_token_to_piece(g_context, new_token_id);
+    g_gen_text += piece;
+    cached_token_chars += format_needs_parsing() ? parse_content_delta(/*is_partial=*/true) : piece;
 
-    // Create and return a valid UTF-8 Java string
-    jstring result = nullptr;
+    // Create and return a valid UTF-8 Java string, buffering incomplete multi-byte sequences.
+    jstring result;
     if (is_valid_utf8(cached_token_chars.c_str())) {
         result = env->NewStringUTF(cached_token_chars.c_str());
-        LOGv("id: %d,\tcached: `%s`,\tnew: `%s`", new_token_id, cached_token_chars.c_str(), new_token_chars.c_str());
-
-        assistant_ss << cached_token_chars;
         cached_token_chars.clear();
     } else {
         LOGv("id: %d,\tappend to cache", new_token_id);
@@ -675,6 +908,7 @@ JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
         JNIEnv *env, jobject, jstring jprompt, jbyteArray jimageData, jint n_predict) {
     reset_short_term_states();
+    pin_threads_to_big_cores();
 
     const auto *user_prompt = env->GetStringUTFChars(jprompt, nullptr);
 
@@ -696,11 +930,15 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
     jsize image_len = env->GetArrayLength(jimageData);
     auto *image_bytes = env->GetByteArrayElements(jimageData, nullptr);
 
-    auto *bitmap = mtmd_helper_bitmap_init_from_buf(
+    // Newer mtmd returns a wrapper {bitmap, video_ctx} by value and takes a trailing
+    // `placeholder` flag (false = actually decode the image, not just reserve a slot).
+    auto bitmap_wrapper = mtmd_helper_bitmap_init_from_buf(
         g_mtmd_ctx,
         reinterpret_cast<const unsigned char *>(image_bytes),
-        image_len
+        image_len,
+        false
     );
+    auto *bitmap = bitmap_wrapper.bitmap;
     env->ReleaseByteArrayElements(jimageData, image_bytes, JNI_ABORT);
 
     if (!bitmap) {
@@ -744,6 +982,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
 
     current_position = new_n_past;
     stop_generation_position = current_position + n_predict;
+    g_last_prompt_eval = current_position; // text + image tokens decoded
 
     return 0;
 }

@@ -1,11 +1,15 @@
 package com.example.qwenchat
 
 import android.app.Application
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import androidx.datastore.core.DataStore
@@ -20,6 +24,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.UnsupportedArchitectureException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,8 +36,6 @@ import kotlinx.coroutines.withContext
 import com.arm.aichat.InferenceEngine.State as EngineState
 import java.io.File
 import java.io.FileOutputStream
-
-private val Application.settingsStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -136,6 +139,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _pendingImagePath = MutableStateFlow<String?>(null)
     val pendingImagePath: StateFlow<String?> = _pendingImagePath
+
+    private val _serverRunning = MutableStateFlow(com.example.qwenchat.server.LlmServerService.isRunning)
+    val serverRunning: StateFlow<Boolean> = _serverRunning
+
+    private val _serverUrl = MutableStateFlow("")
+    val serverUrl: StateFlow<String> = _serverUrl
 
     init {
         viewModelScope.launch(Dispatchers.Default) {
@@ -264,6 +273,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _appState.value = AppState.LoadingModel
                 _statusText.value = "Initializing engine..."
 
+                // Reset the engine to Initialized before (re)loading. A previously loaded model
+                // sits in ModelReady, and a previously *failed* load leaves it in Error; cleanUp()
+                // recovers from both. Without this, the wait below (which expects Initialized)
+                // would hang on ModelReady, or short-circuit to a misleading "init failed" on Error.
+                if (engine.state.value is EngineState.ModelReady || engine.state.value is EngineState.Error) {
+                    _statusText.value = "Unloading current model..."
+                    engine.cleanUp()
+                }
+
                 engine.state.first { it is EngineState.Initialized || it is EngineState.Error }
                 if (engine.state.value is EngineState.Error) {
                     throw Exception("Engine failed to initialize")
@@ -298,6 +316,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 _statusText.value = ""
                 _appState.value = AppState.Ready
+            } catch (e: UnsupportedArchitectureException) {
+                Log.e(TAG, "Model file not loadable (bad GGUF or unsupported arch)", e)
+                // Recover the engine so the next attempt isn't blocked by the sticky Error state.
+                runCatching { if (engine.state.value is EngineState.Error) engine.cleanUp() }
+                _appState.value = AppState.Error(
+                    "Couldn't load this file. It's either not a valid GGUF model (corrupt/incomplete " +
+                        "download) or its architecture isn't supported by this build."
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to load model", e)
                 _appState.value = AppState.Error("Failed to load model: ${e.message}")
@@ -464,6 +490,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         generationJob = null
     }
 
+    fun setServerRunning(enabled: Boolean) {
+        if (enabled) {
+            // Without a Doze/battery-optimization exemption the phone suspends the server's
+            // network access once the screen locks, making it unreachable until unlocked.
+            requestBatteryExemptionIfNeeded()
+            com.example.qwenchat.server.LlmServerService.Controller.start(app)
+            _serverUrl.value = "http://${localIpAddress()}:11434"
+        } else {
+            com.example.qwenchat.server.LlmServerService.Controller.stop(app)
+            _serverUrl.value = ""
+        }
+        _serverRunning.value = enabled
+    }
+
+    /** Prompt the user to exempt the app from battery optimization (Doze) if not already exempt. */
+    private fun requestBatteryExemptionIfNeeded() {
+        val pm = app.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(app.packageName)) return
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:${app.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { app.startActivity(intent) }
+            .onFailure { Log.e(TAG, "Could not request battery-optimization exemption", it) }
+    }
+
+    private fun localIpAddress(): String =
+        runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces().toList()
+                .flatMap { it.inetAddresses.toList() }
+                .firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                ?.hostAddress
+        }.getOrNull() ?: "0.0.0.0"
+
     fun newChat() {
         currentSession = null
         _currentSessionId.value = null
@@ -561,7 +621,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        if (::engine.isInitialized) {
+        // The engine is a process-wide singleton shared with the headless server service. If the
+        // server is running, it owns the engine now — destroying it here would pull the model out
+        // from under in-flight requests (SIGSEGV in native code). Only tear down when serving off.
+        if (::engine.isInitialized && !com.example.qwenchat.server.LlmServerService.isRunning) {
             engine.destroy()
         }
     }

@@ -50,9 +50,19 @@ class MainActivity : ComponentActivity() {
         pendingImagePick = null
     }
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* granted or not — the server still runs; the notification just may be hidden */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // The LLM server runs as a foreground service; on Android 13+ the ongoing notification
+        // requires runtime permission to be visible.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         setContent {
             QwenChatTheme {
@@ -93,6 +103,9 @@ private fun AppNavigation(
     val currentSessionId by viewModel.currentSessionId.collectAsState()
     val visionAvailable by viewModel.visionAvailable.collectAsState()
     val pendingImagePath by viewModel.pendingImagePath.collectAsState()
+    val serverRunning by viewModel.serverRunning.collectAsState()
+    val serverUrl by viewModel.serverUrl.collectAsState()
+    val modelPath by viewModel.modelPath.collectAsState()
 
     var downloadProgress by remember { mutableStateOf<Float?>(null) }
 
@@ -186,7 +199,15 @@ private fun AppNavigation(
                 systemPrompt = systemPrompt,
                 reasoningEnabled = reasoningEnabled,
                 recursionDepth = recursionDepth,
+                currentModelName = modelPath?.let { java.io.File(it).name } ?: "",
                 mmprojLoaded = visionAvailable,
+                serverRunning = serverRunning,
+                serverUrl = serverUrl,
+                onPickModel = {
+                    onPickFile { uri ->
+                        uri?.let { viewModel.loadModelFromUri(it) }
+                    }
+                },
                 onTemperatureChange = { viewModel.updateTemperature(it) },
                 onContextSizeChange = { viewModel.updateContextSize(it) },
                 onSystemPromptChange = { viewModel.updateSystemPrompt(it) },
@@ -197,6 +218,7 @@ private fun AppNavigation(
                         uri?.let { viewModel.loadMmprojFromUri(it) }
                     }
                 },
+                onServerToggle = { viewModel.setServerRunning(it) },
                 onBack = { navController.popBackStack() }
             )
         }

@@ -26,6 +26,13 @@ interface InferenceEngine {
     suspend fun setSystemPrompt(systemPrompt: String)
 
     /**
+     * Resets the conversation context (clears the KV cache and chat history) and installs a
+     * fresh system prompt. Unlike [setSystemPrompt], this may be called at any time while a
+     * model is loaded — intended for stateless server use where each request is independent.
+     */
+    suspend fun resetSession(systemPrompt: String)
+
+    /**
      * Sends a user prompt to the loaded model and returns a Flow of generated tokens.
      */
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
@@ -78,6 +85,16 @@ interface InferenceEngine {
      * Returns the active context size (n_ctx) of the loaded model.
      */
     fun getActiveContextSize(): Int
+
+    /**
+     * Number of prompt tokens evaluated for the most recent request (ollama `prompt_eval_count`).
+     */
+    fun getPromptEvalCount(): Int
+
+    /**
+     * Number of tokens generated for the most recent request (ollama `eval_count`).
+     */
+    fun getEvalCount(): Int
 
     /**
      * Unloads the currently loaded model.
