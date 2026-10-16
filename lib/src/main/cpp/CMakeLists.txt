@@ -55,6 +55,13 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${LLAMA_SRC}/tools/mtmd
         ${LLAMA_SRC}/vendor)
 
+# Same shared OpenMP runtime the CPU backends use, so pin_threads_to_big_cores() can reach
+# their compute threads from a parallel region.
+if(GGML_OPENMP)
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(${CMAKE_PROJECT_NAME} OpenMP::OpenMP_CXX)
+endif()
+
 target_link_libraries(${CMAKE_PROJECT_NAME}
         llama
         llama-common

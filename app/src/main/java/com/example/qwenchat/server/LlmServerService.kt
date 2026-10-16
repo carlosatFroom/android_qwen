@@ -94,6 +94,9 @@ class LlmServerService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start LLM server", e)
                 updateNotification("Failed: ${e.message}")
+                // Don't linger as a "running" service with nothing listening: isRunning would
+                // keep the UI showing "Serving" and make the next start request a no-op.
+                stopSelf()
             }
         }
         return START_STICKY

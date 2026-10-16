@@ -8,9 +8,8 @@ import com.arm.aichat.internal.InferenceEngineImpl.Companion.getInstance
 import dalvik.annotation.optimization.FastNative
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +22,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.Executors
 
 /**
  * JNI wrapper for the llama.cpp library providing Android-friendly access to large language models.
@@ -148,10 +148,15 @@ internal class InferenceEngineImpl private constructor(
     private var _cancelGeneration = false
 
     /**
-     * Single-threaded coroutine dispatcher & scope for LLama asynchronous operations
+     * Single-threaded coroutine dispatcher & scope for LLama asynchronous operations.
+     *
+     * One dedicated OS thread, not a view onto a shared pool: ggml runs each decode on an OpenMP
+     * team owned by the calling thread, so a caller that hops between pool threads leaves a
+     * trail of extra teams whose idle workers keep spinning on the cores the active team needs.
      */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private val llamaDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val llamaDispatcher = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "llama-engine").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
     private val llamaScope = CoroutineScope(llamaDispatcher + SupervisorJob())
 
     init {

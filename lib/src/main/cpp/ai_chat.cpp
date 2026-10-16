@@ -9,7 +9,6 @@
 #include <vector>
 #include <unistd.h>
 #include <sched.h>
-#include <dirent.h>
 #include <sampling.h>
 
 #include "logging.h"
@@ -105,8 +104,11 @@ static long read_cpu_max_freq(int cpu) {
 // full speed. Falls back to an unpinned thread count when the topology can't be read.
 //
 // The CPU backends are loaded at runtime (multiple arch variants), so ggml's threadpool
-// affinity API isn't linkable here. Instead we apply the affinity ourselves with
-// sched_setaffinity over every thread in /proc/self/task — which covers the OpenMP workers.
+// affinity API isn't linkable here. Instead each compute thread pins itself: ggml runs its
+// work on the shared OpenMP runtime (libomp.so), so a parallel region of the same size from
+// the same calling thread reuses that same team. Only the compute threads get pinned — the
+// UI, HTTP server and GC threads stay free to run elsewhere instead of competing with the
+// compute threads for the big cores.
 struct ThreadPlan {
     int  n_threads = 1;
     bool cpumask[GGML_MAX_N_THREADS] = {};
@@ -161,9 +163,9 @@ static ThreadPlan plan_big_core_threads() {
     return plan;
 }
 
-// Pin every thread of this process to the big-core cluster. Re-applied at the start of each
-// generation so OpenMP workers (created lazily on the first decode) and any threads the OS
-// tried to migrate to the little cores get herded back onto the big cores.
+// Pin the calling thread and its OpenMP team to the big-core cluster. Re-applied before each
+// decode because the Kotlin side drives JNI from a pooled dispatcher, so the calling thread
+// (and with it the OpenMP team) can change between calls, and the OS may have migrated them.
 static void pin_threads_to_big_cores() {
     if (!g_thread_plan.has_mask) return;
 
@@ -175,19 +177,16 @@ static void pin_threads_to_big_cores() {
     }
     if (n == 0) return;
 
-    DIR *d = opendir("/proc/self/task");
-    if (!d) {
-        sched_setaffinity(0, sizeof(set), &set); // at least pin the caller
-        return;
-    }
+#ifdef _OPENMP
     int pinned = 0;
-    for (struct dirent *e = readdir(d); e != nullptr; e = readdir(d)) {
-        if (e->d_name[0] == '.') continue;
-        const int tid = atoi(e->d_name);
-        if (tid > 0 && sched_setaffinity(tid, sizeof(set), &set) == 0) pinned++;
+    #pragma omp parallel num_threads(g_thread_plan.n_threads) reduction(+:pinned)
+    {
+        if (sched_setaffinity(0, sizeof(set), &set) == 0) pinned++;
     }
-    closedir(d);
-    LOGi("%s: pinned %d threads to %d big cores", __func__, pinned, n);
+#else
+    const int pinned = sched_setaffinity(0, sizeof(set), &set) == 0 ? 1 : 0;
+#endif
+    LOGd("%s: pinned %d compute threads to %d big cores", __func__, pinned, n);
 }
 
 static llama_context *init_context(llama_model *model, const int n_ctx) {
@@ -499,15 +498,24 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     new_msg.role = role;
     new_msg.content = content;
 
-    // Only use jinja for non-system messages; Qwen's jinja template
-    // requires at least one user message, so it crashes on system-only input.
-    const bool use_jinja = g_enable_thinking && (role != ROLE_SYSTEM);
+    // Use jinja for every non-system message, thinking on or off: only the model's own template
+    // knows how to switch reasoning off (Qwen3.5 emits an empty <think></think> block after the
+    // generation prompt). The legacy path leaves that out, so the model decides for itself and
+    // often writes a long "Thinking Process" into the answer. System-only input stays legacy:
+    // Qwen's jinja template requires at least one user message and crashes without one.
+    const bool use_jinja = (role != ROLE_SYSTEM);
     const bool add_ass = (role == ROLE_USER);
 
     // Replicate common_chat_format_single logic with enable_thinking support
     common_chat_templates_inputs inputs;
     inputs.use_jinja = use_jinja;
     inputs.enable_thinking = use_jinja && g_enable_thinking;
+    // The reply parser is built here, and it only learns to separate <think> blocks when a
+    // reasoning format is set (the default, NONE, leaves them in content). Mirror
+    // rebuild_parser_params(), which decides whether that reasoning is shown or dropped.
+    inputs.reasoning_format = g_enable_thinking
+        ? COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY
+        : COMMON_REASONING_FORMAT_AUTO;
 
     std::string fmt_past_msg;
     if (!chat_msgs.empty()) {
@@ -801,6 +809,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Populate the batch with new token, then decode
     common_batch_clear(g_batch);
     common_batch_add(g_batch, new_token_id, current_position, {0}, true);
+    pin_threads_to_big_cores();
     if (llama_decode(g_context, g_batch) != 0) {
         LOGe("%s: llama_decode() failed for generated token", __func__);
         return nullptr;

@@ -25,6 +25,7 @@ import androidx.lifecycle.viewModelScope
 import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.UnsupportedArchitectureException
+import com.arm.aichat.isModelLoaded
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -151,6 +152,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             engine = AiChat.getInferenceEngine(app.applicationContext)
             loadSettings()
             refreshSessions()
+            // The engine is a process-wide singleton that outlives this ViewModel (the server
+            // service keeps it alive). If it already holds a model — the saved one, since only
+            // this ViewModel and the service ever load it — reuse it instead of unloading the
+            // model out from under the server and reloading it on every activity recreation.
+            if (engine.state.value.isModelLoaded) {
+                _appState.value = AppState.Ready
+                _visionAvailable.value = engine.isVisionLoaded()
+                return@launch
+            }
             _modelPath.value?.let { path ->
                 if (File(path).exists()) {
                     loadModelFromPath(path)
@@ -250,12 +260,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!it.exists()) it.mkdirs()
                 }
                 val destFile = File(modelsDir, "model.gguf")
+                // Copy beside it, then rename over it. The engine mmaps model.gguf, so writing
+                // into it in place truncates the pages the running model reads (SIGBUS) and the
+                // crash leaves a half-copied file. A rename swaps the name to a new inode while
+                // the old mapping stays valid until loadModelFromPath() unloads it.
+                val tmpFile = File(modelsDir, "model.gguf.tmp")
 
                 app.contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(destFile).use { output ->
+                    FileOutputStream(tmpFile).use { output ->
                         input.copyTo(output)
                     }
                 } ?: throw Exception("Could not open file")
+                if (!tmpFile.renameTo(destFile)) {
+                    tmpFile.delete()
+                    throw Exception("Could not replace the model file")
+                }
 
                 _modelPath.value = destFile.absolutePath
                 saveSettings()

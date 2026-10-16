@@ -106,7 +106,17 @@ class LlmServer(
     private fun Application.configureRoutes() {
         routing {
             get("/") { call.respondText("Qwen Chat LLM server. Model: ${modelName()}") }
-            get("/health") { call.respondText("""{"status":"ok"}""", ContentType.Application.Json) }
+            // Reports the engine's real state, not just "the HTTP server is up": 503 when no model
+            // is loaded, and `engine` shows whether it's idle (ModelReady) or busy generating.
+            get("/health") {
+                val state = this@LlmServer.engine.state.value // bare `engine` is Ktor's Application.engine
+                val loaded = state.isModelLoaded
+                call.respondText(
+                    """{"status":"${if (loaded) "ok" else "no_model"}","engine":"${state.javaClass.simpleName}"}""",
+                    ContentType.Application.Json,
+                    if (loaded) HttpStatusCode.OK else HttpStatusCode.ServiceUnavailable,
+                )
+            }
 
             // Model listing.
             get("/api/tags") {
