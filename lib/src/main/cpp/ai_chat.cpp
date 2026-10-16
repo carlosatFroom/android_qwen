@@ -731,7 +731,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
 
     // Update position
     current_position += user_prompt_size;
-    stop_generation_position = current_position + user_prompt_size + n_predict;
+    stop_generation_position = current_position + n_predict;
     g_last_prompt_eval = current_position; // full prompt (system + history + user) decoded so far
 
     // The jinja template with enable_thinking already includes <think>...</think>

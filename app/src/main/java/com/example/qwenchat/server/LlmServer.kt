@@ -39,10 +39,11 @@ class LlmServer(
 ) {
     private companion object {
         const val TAG = "LlmServer"
-        // Cap a single response so slow phones finish within the dispatcher's per-call HTTP
-        // timeout (OLLAMA_TIMEOUT_S=300s). The queue does its own multi-iteration refinement,
-        // so individual answers don't need to consume the whole context window.
-        const val MAX_PREDICT = 1024
+        // Cap a single response so a runaway generation can't hold the phone forever. Real
+        // queue answers run up to ~4.7k tokens (and used to get through because the native
+        // stop position double-counted the prompt), so the cap sits well above that; the
+        // remaining context still bounds it below.
+        const val MAX_PREDICT = 8192
     }
 
     private val genMutex = Mutex()
